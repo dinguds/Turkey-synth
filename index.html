@@ -24,6 +24,7 @@
     --roll-line: #ece6dd;
     --roll-octave: #cfc6b9;
     --roll-head: rgba(196, 81, 31, .12);
+    --roll-bar: #8f857a;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -44,6 +45,7 @@
       --roll-line: #2c2925;
       --roll-octave: #46413a;
       --roll-head: rgba(255, 138, 76, .14);
+      --roll-bar: #7a7166;
     }
   }
   * { box-sizing: border-box; }
@@ -119,14 +121,21 @@
   .transport .bpm input { flex: 1; }
   .transport .bpm span { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 56px; text-align: right; }
 
-  .roll {
-    display: grid;
-    grid-template-columns: 52px repeat(16, minmax(0, 1fr));
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .transport .seg button { border: none; border-radius: 0; padding: 8px 10px; font-weight: 500; }
+  .transport .seg button + button { border-left: 1px solid var(--line); }
+  .transport .seg button[aria-pressed="true"] { color: var(--accent); font-weight: 700; }
+
+  .roll-wrap {
     border: 1px solid var(--line);
     border-radius: 8px;
-    overflow: hidden;
+    overflow-x: auto;
+  }
+  .roll {
+    display: grid;
+    grid-template-columns: 52px repeat(var(--steps), minmax(14px, 1fr));
+    position: relative;
     user-select: none;
-    touch-action: none;
   }
   .key {
     font: 600 10px ui-monospace, monospace;
@@ -138,6 +147,10 @@
     background: var(--key-white);
     color: var(--key-white-text);
     cursor: pointer;
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    touch-action: pan-x;
   }
   .key.black { background: var(--key-black); color: var(--key-black-text); }
   .key.c { border-bottom-color: var(--roll-octave); }
@@ -147,15 +160,32 @@
     border-left: 1px solid var(--roll-line);
     border-bottom: 1px solid var(--roll-line);
     background: var(--roll-white);
-    cursor: pointer;
-    padding: 0;
+    cursor: crosshair;
+    touch-action: none;
   }
   .cell.black { background: var(--roll-black); }
   .cell.c { border-bottom-color: var(--roll-octave); }
   .cell.beat { border-left-color: var(--roll-octave); }
+  .cell.bar { border-left-color: var(--roll-bar); }
   .cell.head { box-shadow: inset 0 0 0 999px var(--roll-head); }
-  .cell.active { background: var(--accent); }
-  .cell.active.head { box-shadow: inset 0 0 0 999px rgba(255,255,255,.25); }
+  .note {
+    position: relative;
+    z-index: 1;
+    margin: 1px 0 2px 1px;
+    border-radius: 3px;
+    background: var(--accent);
+    cursor: ew-resize;
+    touch-action: none;
+  }
+  .note::after { /* resize grip */
+    content: "";
+    position: absolute;
+    right: 3px; top: 4px; bottom: 4px;
+    width: 2px;
+    border-radius: 1px;
+    background: rgba(255,255,255,.55);
+  }
+  .note.playing { filter: brightness(1.3); }
 </style>
 </head>
 <body>
@@ -194,10 +224,15 @@
     <div class="transport">
       <button id="play">Play</button>
       <button id="clear">Clear</button>
+      <div class="seg" id="bars" role="group" aria-label="Loop length">
+        <button data-bars="1" aria-pressed="true">1 bar</button>
+        <button data-bars="2" aria-pressed="false">2</button>
+        <button data-bars="4" aria-pressed="false">4</button>
+      </div>
       <label class="bpm" for="bpm">Tempo <input id="bpm" type="range" min="60" max="200" value="120"><span id="bpmVal"></span></label>
     </div>
-    <div class="roll" id="roll"></div>
-    <p class="hint">Click or drag on the grid to draw notes · click a key to hear it · uses the oscillator's waveform, detune and volume</p>
+    <div class="roll-wrap" id="rollWrap"><div class="roll" id="roll"></div></div>
+    <p class="hint">Click a cell and drag right to draw a note · drag a note to change its length · click a note to delete it · click a key to hear it</p>
   </div>
 </main>
 
@@ -242,7 +277,10 @@
     noteBus = ctx.createGain();
     noteVol = ctx.createGain();
     noteVol.gain.value = vol() * 0.5;
-    noteBus.connect(analyser);
+    const scopeTrim = ctx.createGain(); // headroom so chords fit on the scope
+    scopeTrim.gain.value = 0.4;
+    noteBus.connect(scopeTrim);
+    scopeTrim.connect(analyser);
     noteBus.connect(noteVol);
     noteVol.connect(ctx.destination);
   }
@@ -302,60 +340,125 @@
   });
 
   // ---- Piano roll ----
-  const LOW = 48, HIGH = 71, STEPS = 16; // C3–B4, one bar of 16th notes
+  // Notes are {m, start, len} in 16th-note steps; the loop is 1, 2 or 4 bars long.
+  const LOW = 48, HIGH = 71, STEPS_PER_BAR = 16, KEY_W = 52; // C3–B4
   const rows = [];
   for (let m = HIGH; m >= LOW; m--) rows.push(m);
+  const rowOf = {};
+  rows.forEach((m, r) => (rowOf[m] = r));
   const isBlack = (m) => [1, 3, 6, 8, 10].includes(m % 12);
-  const pattern = new Set(); // keys like "midi:step"
-  const cells = {};          // "midi:step" -> element
+  const rollEl = $('roll'), wrapEl = $('rollWrap');
   const keyEls = {};
-  const rollEl = $('roll');
+  let steps = STEPS_PER_BAR, notes = [], cellCols = [], headStep = -1;
 
-  for (const m of rows) {
-    const key = document.createElement('button');
-    key.className = 'key' + (isBlack(m) ? ' black' : '') + (m % 12 === 0 ? ' c' : '');
-    key.textContent = midiName(m);
-    key.title = midiName(m) + ' · ' + midiToFreq(m).toFixed(1) + ' Hz';
-    key.addEventListener('pointerdown', () => { ensureAudio(); playNote(m, ctx.currentTime, 0.35); flashKey(m, 350); });
-    rollEl.appendChild(key);
-    keyEls[m] = key;
-    for (let s = 0; s < STEPS; s++) {
-      const c = document.createElement('div');
-      c.className = 'cell' + (isBlack(m) ? ' black' : '') + (m % 12 === 0 ? ' c' : '') + (s % 4 === 0 ? ' beat' : '');
-      c.dataset.id = m + ':' + s;
-      c.title = midiName(m) + ', step ' + (s + 1);
-      rollEl.appendChild(c);
-      cells[m + ':' + s] = c;
+  function buildGrid() {
+    rollEl.innerHTML = '';
+    rollEl.style.setProperty('--steps', steps);
+    cellCols = Array.from({ length: steps }, () => []);
+    rows.forEach((m, r) => {
+      const key = document.createElement('button');
+      key.className = 'key' + (isBlack(m) ? ' black' : '') + (m % 12 === 0 ? ' c' : '');
+      key.textContent = midiName(m);
+      key.title = midiName(m) + ' · ' + midiToFreq(m).toFixed(1) + ' Hz';
+      key.style.gridArea = `${r + 1} / 1`;
+      key.addEventListener('pointerdown', () => { ensureAudio(); playNote(m, ctx.currentTime, 0.35); flashKey(m, 350); });
+      rollEl.appendChild(key);
+      keyEls[m] = key;
+      for (let s = 0; s < steps; s++) {
+        const c = document.createElement('div');
+        c.className = 'cell' + (isBlack(m) ? ' black' : '') + (m % 12 === 0 ? ' c' : '') +
+          (s % STEPS_PER_BAR === 0 && s ? ' bar' : s % 4 === 0 ? ' beat' : '');
+        c.dataset.m = m;
+        c.dataset.s = s;
+        c.style.gridArea = `${r + 1} / ${s + 2}`;
+        rollEl.appendChild(c);
+        cellCols[s].push(c);
+      }
+    });
+    headStep = -1;
+    notes.forEach((n) => { n.el = null; renderNote(n); });
+  }
+
+  function renderNote(n) {
+    if (!n.el) {
+      n.el = document.createElement('div');
+      n.el.className = 'note';
+      n.el._note = n;
     }
+    n.el.style.gridArea = `${rowOf[n.m] + 1} / ${n.start + 2} / auto / span ${n.len}`;
+    n.el.title = `${midiName(n.m)} · ${n.len} step${n.len > 1 ? 's' : ''}`;
+    if (!n.el.parentNode) rollEl.appendChild(n.el);
   }
 
-  function setCell(id, on) {
-    if (on) pattern.add(id); else pattern.delete(id);
-    cells[id].classList.toggle('active', on);
+  function addNote(m, start, len) {
+    const n = { m, start, len: 1 };
+    notes.push(n);
+    n.len = Math.max(1, Math.min(len, maxLen(n)));
+    renderNote(n);
+    return n;
   }
 
-  // Click to toggle; drag to paint (or erase, if the drag started on a filled cell).
-  let painting = null;
+  function removeNote(n) {
+    n.el.remove();
+    notes = notes.filter((x) => x !== n);
+  }
+
+  // Longest a note can get before it hits the next note on its row or the loop end.
+  function maxLen(n) {
+    let end = steps;
+    for (const o of notes) if (o !== n && o.m === n.m && o.start > n.start) end = Math.min(end, o.start);
+    return end - n.start;
+  }
+
+  function stepAt(clientX) {
+    const r = rollEl.getBoundingClientRect();
+    const s = Math.floor((clientX - r.left - KEY_W) / ((r.width - KEY_W) / steps));
+    return Math.max(0, Math.min(steps - 1, s));
+  }
+
+  // Empty cell: add a note and drag right to lengthen it.
+  // Existing note: drag to resize, click to delete.
+  let drag = null;
   rollEl.addEventListener('pointerdown', (e) => {
-    const c = e.target.closest('.cell');
-    if (!c) return;
+    const noteEl = e.target.closest('.note');
+    const cell = e.target.closest('.cell');
+    if (!noteEl && !cell) return;
     e.preventDefault();
-    painting = !pattern.has(c.dataset.id);
-    setCell(c.dataset.id, painting);
-    if (painting) {
+    let n, created = false;
+    if (noteEl) {
+      n = noteEl._note;
+    } else {
+      n = addNote(+cell.dataset.m, +cell.dataset.s, 1);
+      created = true;
       ensureAudio();
-      const m = +c.dataset.id.split(':')[0];
-      playNote(m, ctx.currentTime, 0.2);
-      flashKey(m, 200);
+      playNote(n.m, ctx.currentTime, 0.2);
+      flashKey(n.m, 200);
     }
+    drag = { n, created, moved: false, s0: stepAt(e.clientX), len0: n.len };
+    rollEl.setPointerCapture(e.pointerId);
   });
   rollEl.addEventListener('pointermove', (e) => {
-    if (painting === null) return;
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const c = el && el.closest('.cell');
-    if (c && pattern.has(c.dataset.id) !== painting) setCell(c.dataset.id, painting);
+    if (!drag) return;
+    const { n } = drag;
+    const len = Math.max(1, Math.min(maxLen(n), drag.len0 + stepAt(e.clientX) - drag.s0));
+    if (len !== n.len) { n.len = len; drag.moved = true; renderNote(n); }
   });
-  window.addEventListener('pointerup', () => (painting = null));
+  const endDrag = () => {
+    if (drag && !drag.created && !drag.moved) removeNote(drag.n);
+    drag = null;
+  };
+  rollEl.addEventListener('pointerup', endDrag);
+  rollEl.addEventListener('pointercancel', () => (drag = null));
+
+  function setBars(b) {
+    steps = b * STEPS_PER_BAR;
+    notes = notes.filter((n) => n.start < steps);
+    notes.forEach((n) => (n.len = Math.min(n.len, steps - n.start)));
+    document.querySelectorAll('#bars button').forEach((btn) => btn.setAttribute('aria-pressed', +btn.dataset.bars === b));
+    headQueue = [];
+    buildGrid();
+  }
+  document.querySelectorAll('#bars button').forEach((btn) => btn.addEventListener('click', () => setBars(+btn.dataset.bars)));
 
   function ensureAudio() {
     if (!ctx) initAudio();
@@ -378,42 +481,54 @@
     o.stop(when + dur + 0.2);
   }
 
-  const keyTimers = {};
-  function flashKey(m, ms) {
-    keyEls[m].classList.add('on');
-    clearTimeout(keyTimers[m]);
-    keyTimers[m] = setTimeout(() => keyEls[m].classList.remove('on'), ms);
+  const flashTimers = new Map();
+  function flash(el, cls, ms) {
+    el.classList.add(cls);
+    clearTimeout(flashTimers.get(el));
+    flashTimers.set(el, setTimeout(() => el.classList.remove(cls), ms));
   }
+  const flashKey = (m, ms) => flash(keyEls[m], 'on', ms);
 
   // Lookahead scheduler: audio timing stays tight even if the UI thread stutters.
   const bpmEl = $('bpm'), playEl = $('play');
-  let seqTimer = null, nextStep = 0, nextTime = 0, headQueue = [], headStep = -1;
+  let seqTimer = null, nextStep = 0, nextTime = 0, headQueue = [];
   const stepDur = () => 60 / +bpmEl.value / 4;
 
   function schedule() {
     while (nextTime < ctx.currentTime + 0.1) {
-      for (const m of rows) {
-        if (pattern.has(m + ':' + nextStep)) playNote(m, nextTime, stepDur() * 0.9);
-      }
-      headQueue.push({ step: nextStep, time: nextTime });
+      if (nextStep >= steps) nextStep = 0;
+      const starting = notes.filter((n) => n.start === nextStep);
+      for (const n of starting) playNote(n.m, nextTime, stepDur() * (n.len - 0.1));
+      headQueue.push({ step: nextStep, time: nextTime, starting });
       nextTime += stepDur();
-      nextStep = (nextStep + 1) % STEPS;
+      nextStep = (nextStep + 1) % steps;
     }
   }
 
-  function setHead(step) {
+  function setHead(step, starting = []) {
     if (step === headStep) return;
-    for (const m of rows) {
-      if (headStep >= 0) cells[m + ':' + headStep].classList.remove('head');
-      if (step >= 0) cells[m + ':' + step].classList.add('head');
+    if (cellCols[headStep]) cellCols[headStep].forEach((c) => c.classList.remove('head'));
+    headStep = cellCols[step] ? step : -1;
+    if (headStep < 0) return;
+    cellCols[step].forEach((c) => c.classList.add('head'));
+    for (const n of starting) {
+      const ms = stepDur() * n.len * 1000 * 0.95;
+      flashKey(n.m, ms);
+      if (n.el) flash(n.el, 'playing', ms);
     }
-    if (step >= 0) for (const m of rows) if (pattern.has(m + ':' + step)) flashKey(m, stepDur() * 900);
-    headStep = step;
+    // Keep the playhead in view when the roll scrolls sideways.
+    const c = cellCols[step][0];
+    if (c.offsetLeft + c.offsetWidth > wrapEl.scrollLeft + wrapEl.clientWidth || c.offsetLeft - KEY_W < wrapEl.scrollLeft) {
+      wrapEl.scrollLeft = c.offsetLeft - KEY_W;
+    }
   }
 
   function updateHead() {
     if (!ctx) return;
-    while (headQueue.length && headQueue[0].time <= ctx.currentTime) setHead(headQueue.shift().step);
+    while (headQueue.length && headQueue[0].time <= ctx.currentTime) {
+      const h = headQueue.shift();
+      setHead(h.step, h.starting);
+    }
   }
 
   playEl.addEventListener('click', () => {
@@ -432,20 +547,15 @@
     seqTimer = setInterval(schedule, 25);
     playEl.textContent = 'Stop';
   });
-  $('clear').addEventListener('click', () => [...pattern].forEach((id) => setCell(id, false)));
+  $('clear').addEventListener('click', () => [...notes].forEach(removeNote));
   const updateBpm = () => ($('bpmVal').textContent = bpmEl.value + ' BPM');
   bpmEl.addEventListener('input', updateBpm);
   updateBpm();
 
-  // A short starter arpeggio so Play does something right away.
-  [[60, 0], [64, 2], [67, 4], [71, 6], [69, 8], [67, 10], [64, 12], [62, 14]]
-    .forEach(([m, s]) => setCell(m + ':' + s, true));
-
-  document.addEventListener('keydown', (e) => {
-    if (e.code === 'Space') { e.preventDefault(); toggle(); }
-    const i = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code);
-    if (i >= 0) setWave(waveBtns[i].dataset.wave);
-  });
+  buildGrid();
+  // A short starter phrase with mixed note lengths so Play does something right away.
+  [[48, 0, 8], [55, 8, 8], [60, 0, 2], [64, 2, 2], [67, 4, 4], [71, 8, 1], [69, 9, 1], [67, 10, 2], [64, 12, 4]]
+    .forEach(([m, s, len]) => addNote(m, s, len));
 
   // Oscilloscope
   const canvas = $('scope');
