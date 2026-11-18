@@ -373,6 +373,16 @@
   .harm-bars { width: 100%; height: 90px; display: block; margin-top: 8px; touch-action: none; cursor: ns-resize; }
   .wm-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 10px; font-size: .85rem; color: var(--muted); }
   .wm-tools .btn { padding: 6px 10px; font-weight: 500; }
+
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { font: inherit; font-size: .85rem; padding: 7px 12px; border: none; background: transparent; color: var(--text); cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; font-weight: 600; }
+  .wm-slots { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 10px; font-size: .85rem; }
+  .morph-row { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 180px; }
+  .morph-row input { flex: 1; accent-color: var(--accent); }
+  .morph-row span { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; }
+  .morph-row.off { opacity: .45; }
 </style>
 </head>
 <body>
@@ -414,7 +424,15 @@
     <button class="btn" id="savePreset">Save current sound…</button>
 
     <h3>Wave maker</h3>
-    <p class="flow">Draw one cycle of a wave, or drag the harmonic bars (1 = the note itself, 2 = an octave up, and so on). Editing switches the oscillator to <b>Custom</b>.</p>
+    <p class="flow">Draw one cycle of a wave, or drag the harmonic bars (1 = the note itself, 2 = an octave up, and so on). Give it a different <b>end of note</b> shape and every note morphs from one to the other, the way a piano starts bright and mellows. Editing switches the oscillator to <b>Custom</b>.</p>
+    <div class="wm-slots">
+      <div class="seg" role="group" aria-label="Which shape to edit">
+        <button data-slot="A" aria-pressed="true">Start of note</button>
+        <button data-slot="B" aria-pressed="false">End of note</button>
+      </div>
+      <label><input type="checkbox" id="morphOn"> Change over each note</label>
+      <label class="morph-row" id="morphRow">over <input type="range" id="morphTime" min="0" max="1000"> <span id="morphVal"></span></label>
+    </div>
     <canvas id="waveDraw" class="wave-draw" aria-label="Draw a waveform"></canvas>
     <canvas id="harmBars" class="harm-bars" aria-label="Harmonic levels"></canvas>
     <div class="wm-tools">
@@ -568,24 +586,21 @@
   function start() {
     ensureAudio();
     const t = ctx.currentTime, e = envParams();
-    osc = ctx.createOscillator();
-    applyWave(osc);
-    osc.frequency.value = freq();
-    osc.detune.value = +detuneEl.value;
     const env = ctx.createGain();
     env.gain.value = 0;
-    osc.connect(env);
     env.connect(preFx);
+    const oscs = makeSource(env, freq(), t);
+    osc = oscs[0];
     noteOn(env.gain, t, e, DRONE_PEAK);
-    osc.start(t);
-    drone = { osc, env, t0: t, e };
+    drone = { oscs, env, t0: t, e };
     running = true;
     powerEl.textContent = 'Stop';
   }
 
   function stop() {
-    const { osc: o, env, t0, e } = drone;
-    o.stop(noteOff(env.gain, t0, ctx.currentTime + 0.005, e, DRONE_PEAK));
+    const { oscs, env, t0, e } = drone;
+    const end = noteOff(env.gain, t0, ctx.currentTime + 0.005, e, DRONE_PEAK);
+    oscs.forEach((o) => o.stop(end));
     osc = drone = null;
     running = false;
     powerEl.textContent = 'Start';
@@ -594,23 +609,54 @@
   const toggle = () => (running ? stop() : start());
 
   // Custom waveform: Fourier coefficients edited in the Wave maker (index 0 = DC, unused).
+  // There are two shapes: the start of each note (A) and the end (B). With morphing on, every note
+  // crossfades from A to B, the way a real instrument's tone changes as the note rings.
   const HARMS = 64;
-  const custom = { real: new Float32Array(HARMS + 1), imag: new Float32Array(HARMS + 1), wave: null };
-  custom.imag[1] = 1; // starts as a sine
-  function customWave() {
-    if (!custom.wave) custom.wave = ctx.createPeriodicWave(custom.real, custom.imag);
-    return custom.wave;
+  const newSlot = () => ({ real: new Float32Array(HARMS + 1), imag: new Float32Array(HARMS + 1), wave: null });
+  const slotA = newSlot(), slotB = newSlot();
+  slotA.imag[1] = slotB.imag[1] = 1; // both start as a sine
+  let ed = slotA; // the shape being edited in the Wave maker
+  const morph = { on: false, time: 1 };
+  function waveFor(slot) {
+    if (!slot.wave) slot.wave = ctx.createPeriodicWave(slot.real, slot.imag);
+    return slot.wave;
   }
   function applyWave(o) {
-    if (wave === 'custom') o.setPeriodicWave(customWave());
+    if (wave === 'custom') o.setPeriodicWave(waveFor(o.role === 'B' ? slotB : slotA));
     else o.type = wave;
+  }
+  // Oscillator(s) for one note, connected to `dest` and started at t0. Returns them.
+  function makeSource(dest, hz, t0) {
+    const make = (role) => {
+      const o = ctx.createOscillator();
+      o.role = role;
+      applyWave(o);
+      o.frequency.value = hz;
+      o.detune.value = +detuneEl.value;
+      o.start(t0);
+      return o;
+    };
+    const a = make('A');
+    if (!(wave === 'custom' && morph.on)) { a.connect(dest); return [a]; }
+    // Two phase-locked oscillators: crossfading them morphs the harmonics from shape A to B.
+    // The curve is fast at first and then eases off, like harmonics dying away.
+    const b = make('B'), ga = ctx.createGain(), gb = ctx.createGain(), tc = morph.time / 3;
+    ga.gain.setValueAtTime(1, t0);
+    ga.gain.setTargetAtTime(0, t0, tc);
+    gb.gain.setValueAtTime(0, t0);
+    gb.gain.setTargetAtTime(1, t0, tc);
+    a.connect(ga);
+    ga.connect(dest);
+    b.connect(gb);
+    gb.connect(dest);
+    return [a, b];
   }
   // Every oscillator that is sounding (or scheduled to start soon): the drone plus piano-roll notes.
   // Waveform and detune changes are applied to all of them, so you can change the sound mid-note.
   const voices = new Set();
-  const liveOscs = () => (osc ? [osc, ...voices] : [...voices]);
+  const liveOscs = () => (drone ? [...drone.oscs, ...voices] : [...voices]);
   function customChanged() {
-    custom.wave = null;
+    slotA.wave = slotB.wave = null;
     if (wave === 'custom') liveOscs().forEach(applyWave);
   }
 
@@ -625,7 +671,7 @@
 
   freqEl.addEventListener('input', () => {
     updateLabels();
-    if (osc) osc.frequency.setTargetAtTime(freq(), ctx.currentTime, 0.01);
+    if (drone) drone.oscs.forEach((o) => o.frequency.setTargetAtTime(freq(), ctx.currentTime, 0.01));
   });
   detuneEl.addEventListener('input', () => {
     updateLabels();
@@ -803,21 +849,18 @@
   }
 
   function playNote(m, when, dur) {
-    const o = ctx.createOscillator();
     const env = ctx.createGain();
-    applyWave(o);
-    o.frequency.value = midiToFreq(m);
-    o.detune.value = +detuneEl.value;
     env.gain.value = 0;
-    o.connect(env);
     env.connect(noteBus);
     const e = envParams();
     noteOn(env.gain, when, e, 1);
-    o.start(when);
-    o.stop(noteOff(env.gain, when, when + dur, e, 1));
-    voices.add(o);
-    o.env = env;
-    o.onended = () => voices.delete(o);
+    const end = noteOff(env.gain, when, when + dur, e, 1);
+    for (const o of makeSource(env, midiToFreq(m), when)) {
+      o.stop(end);
+      o.env = env;
+      voices.add(o);
+      o.onended = () => voices.delete(o);
+    }
   }
 
   const flashTimers = new Map();
@@ -1247,27 +1290,35 @@
   const drawCv = $('waveDraw'), barsCv = $('harmBars');
   const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-  function normalizeCoeffs() {
+  function normalizeCoeffs(slot = ed) {
     let peak = 0;
-    for (let k = 1; k <= HARMS; k++) peak = Math.max(peak, Math.hypot(custom.real[k], custom.imag[k]));
-    if (peak < 1e-9) { custom.imag[1] = 1; peak = 1; }
-    for (let k = 1; k <= HARMS; k++) { custom.real[k] /= peak; custom.imag[k] /= peak; }
+    for (let k = 1; k <= HARMS; k++) peak = Math.max(peak, Math.hypot(slot.real[k], slot.imag[k]));
+    if (peak < 1e-9) { slot.imag[1] = 1; peak = 1; }
+    for (let k = 1; k <= HARMS; k++) { slot.real[k] /= peak; slot.imag[k] /= peak; }
+  }
+  function fillSlot(slot, fn) {
+    slot.real.fill(0);
+    slot.imag.fill(0);
+    for (let k = 1; k <= HARMS; k++) [slot.real[k], slot.imag[k]] = fn(k);
+    normalizeCoeffs(slot);
   }
   // coefficients -> samples
-  function synthShape() {
+  function synthInto(slot, out) {
     let peak = 1e-9;
     for (let j = 0; j < N; j++) {
       let v = 0;
       for (let k = 1; k <= HARMS; k++) {
-        if (!custom.real[k] && !custom.imag[k]) continue;
+        if (!slot.real[k] && !slot.imag[k]) continue;
         const a = (2 * Math.PI * k * j) / N;
-        v += custom.real[k] * Math.cos(a) + custom.imag[k] * Math.sin(a);
+        v += slot.real[k] * Math.cos(a) + slot.imag[k] * Math.sin(a);
       }
-      shape[j] = v;
+      out[j] = v;
       peak = Math.max(peak, Math.abs(v));
     }
-    for (let j = 0; j < N; j++) shape[j] /= peak;
+    for (let j = 0; j < N; j++) out[j] /= peak;
   }
+  const synthShape = () => synthInto(ed, shape);
+  const ghost = new Float32Array(N);
   // samples -> coefficients (a plain DFT; 64 x 256 is cheap)
   function analyzeShape() {
     let mean = 0;
@@ -1279,18 +1330,18 @@
         re += v * Math.cos(a);
         im += v * Math.sin(a);
       }
-      custom.real[k] = (2 * re) / N;
-      custom.imag[k] = (2 * im) / N;
+      ed.real[k] = (2 * re) / N;
+      ed.imag[k] = (2 * im) / N;
     }
     normalizeCoeffs();
   }
   function setCoeffs(fn) {
-    custom.real.fill(0);
-    custom.imag.fill(0);
+    ed.real.fill(0);
+    ed.imag.fill(0);
     for (let k = 1; k <= HARMS; k++) {
       const [re, im] = fn(k);
-      custom.real[k] = re;
-      custom.imag[k] = im;
+      ed.real[k] = re;
+      ed.imag[k] = im;
     }
     normalizeCoeffs();
     synthShape();
@@ -1315,6 +1366,21 @@
     for (let i = 1; i < 4; i++) { g.moveTo((w * i) / 4, 0); g.lineTo((w * i) / 4, h); }
     g.moveTo(0, h / 2); g.lineTo(w, h / 2);
     g.stroke();
+    if (morph.on) { // the other shape, faintly, for reference
+      synthInto(ed === slotA ? slotB : slotA, ghost);
+      g.strokeStyle = cssVar('--muted');
+      g.globalAlpha = 0.5;
+      g.lineWidth = 1.5;
+      g.setLineDash([4, 4]);
+      g.beginPath();
+      for (let j = 0; j <= N; j++) {
+        const x = (j / N) * w, y = h / 2 - ghost[j % N] * (h / 2) * 0.85;
+        j ? g.lineTo(x, y) : g.moveTo(x, y);
+      }
+      g.stroke();
+      g.setLineDash([]);
+      g.globalAlpha = 1;
+    }
     g.strokeStyle = cssVar('--scope-trace');
     g.lineWidth = 2.5;
     g.lineJoin = 'round';
@@ -1331,7 +1397,7 @@
     g.font = '9px ui-monospace, monospace';
     g.textAlign = 'center';
     for (let k = 1; k <= NB; k++) {
-      const m = Math.min(1, Math.hypot(custom.real[k], custom.imag[k]));
+      const m = Math.min(1, Math.hypot(ed.real[k], ed.imag[k]));
       const x = (k - 1) * bw;
       g.fillStyle = cssVar('--roll-black');
       g.fillRect(x + 1, 0, bw - 2, h - 12);
@@ -1388,10 +1454,10 @@
     const k = Math.max(1, Math.min(NB, Math.floor(((e.clientX - r.left) / r.width) * NB) + 1));
     const m = Math.max(0, Math.min(1, (r.height - 12 - (e.clientY - r.top)) / (r.height - 12)));
     const setMag = (kk, mm) => {
-      const cur = Math.hypot(custom.real[kk], custom.imag[kk]);
-      const ph = cur > 1e-6 ? Math.atan2(custom.imag[kk], custom.real[kk]) : Math.PI / 2; // keep the phase
-      custom.real[kk] = mm * Math.cos(ph);
-      custom.imag[kk] = mm * Math.sin(ph);
+      const cur = Math.hypot(ed.real[kk], ed.imag[kk]);
+      const ph = cur > 1e-6 ? Math.atan2(ed.imag[kk], ed.real[kk]) : Math.PI / 2; // keep the phase
+      ed.real[kk] = mm * Math.cos(ph);
+      ed.imag[kk] = mm * Math.sin(ph);
     };
     if (barDrag.k == null) setMag(k, m);
     else {
@@ -1429,42 +1495,81 @@
     clearPresetHighlight();
   }));
   $('smoothWave').addEventListener('click', () => {
-    setCoeffs((k) => { const f = 1 / (1 + (k / 8) ** 2); return [custom.real[k] * f, custom.imag[k] * f]; });
+    setCoeffs((k) => { const f = 1 / (1 + (k / 8) ** 2); return [ed.real[k] * f, ed.imag[k] * f]; });
     setWave('custom');
   });
+  // Start / End of note shapes and morphing
+  const slotBtns = [...document.querySelectorAll('[data-slot]')];
+  const morphOnEl = $('morphOn'), morphTimeEl = $('morphTime');
+  const morphFromSlider = (v) => 0.05 * Math.pow(100, v / 1000); // 0.05 s .. 5 s
+  const morphToSlider = (t) => Math.round((Math.log(t / 0.05) / Math.log(100)) * 1000);
+  function editSlot(which) {
+    ed = which === 'B' ? slotB : slotA;
+    slotBtns.forEach((b) => b.setAttribute('aria-pressed', b.dataset.slot === which));
+    synthShape();
+    drawWaveMaker();
+  }
+  function setMorph(on, time = morph.time) {
+    morph.on = on;
+    morph.time = time;
+    morphOnEl.checked = on;
+    morphTimeEl.value = morphToSlider(time);
+    $('morphVal').textContent = time < 1 ? Math.round(time * 1000) + ' ms' : time.toFixed(1) + ' s';
+    $('morphRow').classList.toggle('off', !on);
+    if (!on) editSlot('A');
+    drawWaveMaker();
+  }
+  slotBtns.forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.slot === 'B' && !morph.on) {
+      // first time: start the end shape as a copy of the start shape
+      slotB.real.set(slotA.real);
+      slotB.imag.set(slotA.imag);
+      setMorph(true);
+    }
+    editSlot(b.dataset.slot);
+    if (wave !== 'custom') setWave('custom');
+  }));
+  morphOnEl.addEventListener('change', () => {
+    if (morphOnEl.checked && !morph.on) { slotB.real.set(slotA.real); slotB.imag.set(slotA.imag); }
+    setMorph(morphOnEl.checked);
+    if (morph.on && wave !== 'custom') setWave('custom');
+    clearPresetHighlight();
+  });
+  morphTimeEl.addEventListener('input', () => { setMorph(true, morphFromSlider(+morphTimeEl.value)); clearPresetHighlight(); });
+
   window.addEventListener('resize', drawWaveMaker);
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', drawWaveMaker);
   synthShape();
-  drawWaveMaker();
+  setMorph(false, 1);
 
   // ---- Instrument presets ----
   // `harm` = harmonic amplitudes (1st, 2nd, 3rd...) for the Custom wave; or `wave` = a basic waveform.
   // `fx` = pedals to switch on, with their knob settings (pedals left out are switched off).
   const H = (fn, n = 32) => Array.from({ length: n }, (_, i) => fn(i + 1));
   const PRESETS = [
-    { name: 'Piano', harm: H((n) => Math.pow(n, -1.7) * (n % 7 ? 1 : 0.3)),
+    { name: 'Piano', harm: H((n) => Math.pow(n, -1.05) * (n % 7 ? 1 : 0.3)), harmEnd: H((n) => Math.pow(n, -3)), morph: 1.2,
       fx: { env: { a: 0.003, d: 1.4, s: 0, r: 0.35 }, filter: { cutoff: 5000, q: 0.7 }, reverb: { decay: 1.8, tone: 6000, mix: 0.2 } } },
-    { name: 'E. piano', harm: H((n) => [1, 0.3, 0.12, 0.06][n - 1] || 0),
+    { name: 'E. piano', harm: H((n) => ({ 1: 1, 2: 0.5, 3: 0.2, 7: 0.35, 8: 0.25, 14: 0.15 })[n] || 0), harmEnd: H((n) => [1, 0.15, 0.04][n - 1] || 0), morph: 0.5,
       fx: { env: { a: 0.003, d: 2, s: 0.15, r: 0.45 }, chorus: { rate: 0.6, depth: 0.45, mix: 0.7 }, reverb: { decay: 1.5, tone: 5000, mix: 0.15 } } },
     { name: 'Organ', harm: H((n) => ({ 1: 1, 2: 0.8, 3: 0.6, 4: 0.5, 6: 0.35, 8: 0.3, 10: 0.1, 12: 0.15, 16: 0.1 })[n] || 0),
       fx: { env: { a: 0.005, d: 0.05, s: 1, r: 0.06 }, drive: { drive: 2.5, level: 0.7, mix: 0.4 }, chorus: { rate: 5.5, depth: 0.3, mix: 0.5 }, reverb: { decay: 2, tone: 5000, mix: 0.2 } } },
-    { name: 'Strings', harm: H((n) => 1 / n),
+    { name: 'Strings', harm: H((n) => Math.pow(n, -1.6)), harmEnd: H((n) => 1 / n), morph: 0.5,
       fx: { env: { a: 0.4, d: 0.3, s: 0.9, r: 0.7 }, filter: { cutoff: 3500, q: 0.7 }, chorus: { rate: 0.3, depth: 0.7, mix: 0.8 }, reverb: { decay: 3, tone: 6000, mix: 0.35 } } },
-    { name: 'Brass', harm: H((n) => (1 / n) * (n <= 6 ? 1 : 0.6)),
+    { name: 'Brass', harm: H((n) => Math.pow(n, -2.4)), harmEnd: H((n) => (1 / n) * (n <= 6 ? 1 : 0.6)), morph: 0.25,
       fx: { env: { a: 0.07, d: 0.2, s: 0.75, r: 0.15 }, filter: { cutoff: 2400, q: 2 }, reverb: { decay: 1.6, tone: 5000, mix: 0.2 } } },
     { name: 'Flute', harm: H((n) => [1, 0.12, 0.06][n - 1] || 0.01 / n),
       fx: { env: { a: 0.09, d: 0.1, s: 0.9, r: 0.2 }, reverb: { decay: 2.2, tone: 7000, mix: 0.3 } } },
     { name: 'Clarinet', harm: H((n) => (n % 2 ? 1 / n : 0.02)),
       fx: { env: { a: 0.04, d: 0.1, s: 0.9, r: 0.15 }, filter: { cutoff: 3000, q: 0.8 }, reverb: { decay: 1.8, tone: 5000, mix: 0.2 } } },
-    { name: 'Bass', harm: H((n) => Math.pow(n, -1.2)),
+    { name: 'Bass', harm: H((n) => Math.pow(n, -0.9)), harmEnd: H((n) => Math.pow(n, -2.2)), morph: 0.4,
       fx: { env: { a: 0.004, d: 0.5, s: 0.35, r: 0.1 }, drive: { drive: 4, level: 0.6, mix: 0.3 }, filter: { cutoff: 900, q: 3 } } },
-    { name: 'Pluck', harm: H((n) => Math.pow(n, -1.1)),
+    { name: 'Pluck', harm: H((n) => Math.pow(n, -0.8)), harmEnd: H((n) => Math.pow(n, -2.6)), morph: 0.35,
       fx: { env: { a: 0.002, d: 0.45, s: 0, r: 0.3 }, filter: { cutoff: 3500, q: 1.5 }, delay: { time: 0.3, feedback: 0.35, mix: 0.3 }, reverb: { decay: 1.5, tone: 5000, mix: 0.2 } } },
-    { name: 'Bell', harm: H((n) => ({ 1: 1, 3: 0.5, 5: 0.25, 7: 0.4, 11: 0.3, 13: 0.2, 17: 0.1 })[n] || 0),
+    { name: 'Bell', harm: H((n) => ({ 1: 1, 3: 0.5, 5: 0.25, 7: 0.6, 11: 0.5, 13: 0.4, 17: 0.3, 23: 0.2 })[n] || 0), harmEnd: H((n) => ({ 1: 1, 3: 0.15 })[n] || 0), morph: 2,
       fx: { env: { a: 0.002, d: 2.5, s: 0, r: 1.5 }, delay: { time: 0.45, feedback: 0.25, mix: 0.2 }, reverb: { decay: 4, tone: 8000, mix: 0.4 } } },
     { name: 'Lead', wave: 'square',
       fx: { env: { a: 0.01, d: 0.2, s: 0.8, r: 0.15 }, drive: { drive: 8, level: 0.5, mix: 0.5 }, filter: { cutoff: 3000, q: 4 }, delay: { time: 0.35, feedback: 0.4, mix: 0.25 } } },
-    { name: 'Pad', harm: H((n) => 1 / n),
+    { name: 'Pad', harm: H((n) => Math.pow(n, -3)), harmEnd: H((n) => 1 / n), morph: 2.5,
       fx: { env: { a: 1.2, d: 1, s: 0.8, r: 2 }, filter: { cutoff: 1800, q: 1 }, chorus: { rate: 0.4, depth: 0.8, mix: 1 }, phaser: { rate: 0.1, depth: 0.6, feedback: 0.3, mix: 0.6 }, reverb: { decay: 6, tone: 5000, mix: 0.5 } } },
     { name: 'Chiptune', harm: H((n) => Math.abs(Math.sin(Math.PI * n * 0.25)) / n), // 25% pulse
       fx: { env: { a: 0.002, d: 0.05, s: 0.9, r: 0.03 } } },
@@ -1477,18 +1582,20 @@
   const saveUserPresets = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(userPresets)); } catch { /* storage unavailable */ } };
 
   function applyPreset(p, btn) {
-    if (p.coeffs) {
-      custom.real.set(p.coeffs.real);
-      custom.imag.set(p.coeffs.imag);
-      normalizeCoeffs();
-      synthShape();
-      drawWaveMaker();
+    if (p.coeffs || p.harm) {
+      if (p.coeffs) { slotA.real.set(p.coeffs.real); slotA.imag.set(p.coeffs.imag); normalizeCoeffs(slotA); }
+      else fillSlot(slotA, (k) => [0, p.harm[k - 1] || 0]);
+      if (p.coeffsB) { slotB.real.set(p.coeffsB.real); slotB.imag.set(p.coeffsB.imag); normalizeCoeffs(slotB); }
+      else if (p.harmEnd) fillSlot(slotB, (k) => [0, p.harmEnd[k - 1] || 0]);
+      else { slotB.real.set(slotA.real); slotB.imag.set(slotA.imag); }
+      setMorph(!!(p.harmEnd || p.coeffsB), p.morph || 1);
+      editSlot('A');
       customChanged();
       setWave('custom');
-    } else if (p.harm) {
-      setCoeffs((k) => [0, p.harm[k - 1] || 0]);
-      setWave('custom');
-    } else setWave(p.wave || 'sine');
+    } else {
+      setMorph(false);
+      setWave(p.wave || 'sine');
+    }
     for (const def of PEDALS) {
       const st = pedals[def.id], cfg = p.fx[def.id];
       if (cfg) for (const k of def.knobs) st.knobs[k.id].setValue(cfg[k.id] ?? k.value);
@@ -1506,7 +1613,9 @@
   function snapshot(name) {
     const fx = {};
     for (const def of PEDALS) if (pedals[def.id].on) fx[def.id] = { ...pedals[def.id].p };
-    return { name, wave, coeffs: wave === 'custom' ? { real: [...custom.real], imag: [...custom.imag] } : null, fx };
+    const c = (slot) => ({ real: [...slot.real], imag: [...slot.imag] });
+    const isCustom = wave === 'custom';
+    return { name, wave, coeffs: isCustom ? c(slotA) : null, coeffsB: isCustom && morph.on ? c(slotB) : null, morph: morph.time, fx };
   }
   function renderPresets() {
     const box = $('presets');
