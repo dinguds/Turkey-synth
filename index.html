@@ -410,6 +410,29 @@
     .layer .layer-lvl, .layer .layer-det { grid-column: 2; }
     .unison { grid-template-columns: 1fr; }
   }
+
+  /* Preset text */
+  .preset-text { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; }
+  .preset-text > summary { cursor: pointer; padding: 10px 0; font-size: .85rem; font-weight: 600; }
+  .preset-text[open] { padding-bottom: 12px; }
+  .preset-text textarea {
+    width: 100%;
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+    resize: vertical;
+  }
+  .pt-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  .pt-msg { font-size: .8rem; display: grid; gap: 2px; }
+  .pt-ok { color: var(--text); }
+  .pt-warn { color: var(--accent); }
+  .pt-help { margin-top: 8px; font-size: .8rem; color: var(--muted); }
+  .pt-help summary { cursor: pointer; }
+  .pt-help pre { font: 12px/1.5 ui-monospace, monospace; background: var(--bg); padding: 10px; border-radius: 6px; overflow-x: auto; color: var(--text); }
+  .pt-help code { font-family: ui-monospace, monospace; }
 </style>
 </head>
 <body>
@@ -449,6 +472,39 @@
     <p class="flow">Each preset sets the waveform, envelope and pedals. Tweak anything afterwards, then save it as your own.</p>
     <div class="presets" id="presets"></div>
     <button class="btn" id="savePreset">Save current sound…</button>
+
+    <details class="preset-text" id="presetTextBox">
+      <summary>Write a preset as text</summary>
+      <textarea id="presetText" spellcheck="false" rows="14" aria-label="Preset text"></textarea>
+      <div class="pt-actions">
+        <button class="btn primary" id="ptApply">Apply</button>
+        <button class="btn" id="ptCurrent">Show current sound</button>
+        <button class="btn" id="ptSave">Apply &amp; save</button>
+        <button class="btn" id="ptCopy">Copy</button>
+      </div>
+      <div class="pt-msg" id="presetTextMsg" role="status"></div>
+      <details class="pt-help">
+        <summary>How to write it</summary>
+        <p>One <code>setting = value</code> per line. Capitals, spaces and units are optional; <code>#</code> starts a comment. Lines you leave out are off or default.</p>
+        <pre>Piano                    # a first line naming a preset starts from it
+Name = My piano          # or name it without starting from a preset
+Base = Piano             # or say which preset to start from
+Oscillator = saw         # sine, square, saw, triangle or custom
+Harmonics = 1, .5, .3    # custom shape; also saw, square, triangle, 1/n^1.7, odd 1/n
+End harmonics = 1/n^3    # shape at the end of each note
+Morph = 1.2s             # how long the change takes (or off)
+Layer 1 = octave down, 45%, +3ct
+Layer 2 = +7, 30%        # semitones work too
+Unison = 3, 12ct         # voices, spread (or off)
+Attack = 3ms             # also Decay, Sustain, Release
+Drive = off
+Filter = on
+F reso = 1               # short names: F, Dr, Ch, Fl, Ph, Dly, Verb
+F cutoff = 2500          # Hz; 2.5k works too
+Verb mix = 20%           # setting a knob turns its pedal on</pre>
+        <p>Pedals and their knobs: <span id="ptPedalHelp"></span></p>
+      </details>
+    </details>
 
     <h3>Layers</h3>
     <p class="flow">Stack extra copies of the oscillator on every note, at an octave or a fifth away. Unison adds slightly detuned copies spread left and right for a thicker sound.</p>
@@ -1789,6 +1845,302 @@
     renderPresets();
   });
   renderPresets();
+
+  // ---- Presets as text ----
+  // A small, forgiving "key = value" language. See the help under the text box for the syntax.
+  const PEDAL_ALIASES = {
+    env: ['envelope', 'env', 'adsr', 'amp'],
+    drive: ['drive', 'dr', 'distortion', 'dist', 'overdrive', 'od'],
+    filter: ['filter', 'f', 'flt', 'lpf', 'lowpass', 'filt'],
+    chorus: ['chorus', 'ch', 'cho'],
+    flanger: ['flanger', 'fl', 'flange', 'flang'],
+    phaser: ['phaser', 'ph', 'phase'],
+    delay: ['delay', 'dl', 'dly', 'echo'],
+    reverb: ['reverb', 'rv', 'verb', 'rev', 'rvb'],
+  };
+  const KNOB_ALIASES = {
+    q: ['res', 'reso', 'resonance', 'q', 'peak'], cutoff: ['cutoff', 'cut', 'freq', 'frequency', 'cf'],
+    mix: ['mix', 'wet', 'amount', 'blend'], level: ['level', 'volume', 'vol', 'out', 'output', 'gain out'],
+    drive: ['drive', 'gain', 'amount in'], feedback: ['feedback', 'fb', 'repeats', 'regen', 'regeneration'],
+    rate: ['rate', 'speed'], depth: ['depth', 'width', 'intensity'], time: ['time', 'delay time', 'length'],
+    decay: ['decay', 'size', 'room'], tone: ['tone', 'color', 'colour', 'damping'],
+    a: ['attack', 'atk', 'a'], d: ['decay', 'dec', 'd'], s: ['sustain', 'sus', 's'], r: ['release', 'rel', 'r'],
+  };
+  const WAVE_NAMES = { sine: 'sine', sin: 'sine', square: 'square', sq: 'square', saw: 'sawtooth', sawtooth: 'sawtooth', triangle: 'triangle', tri: 'triangle', custom: 'custom' };
+  const INTERVAL_WORDS = {
+    'octave down': -12, 'octave below': -12, 'octave up': 12, octave: 12, 'octave above': 12,
+    '2 octaves down': -24, 'two octaves down': -24, '2 octaves up': 24, 'two octaves up': 24,
+    fifth: 7, '5th': 7, 'fifth up': 7, '5th up': 7, 'fifth down': -7, '5th down': -7,
+    fourth: 5, '4th': 5, 'fourth up': 5, '4th up': 5, 'fourth down': -5, '4th down': -5,
+    third: 4, '3rd': 4, 'major third': 4, 'major 3rd': 4, 'major 3rd up': 4, 'minor third': 3, 'minor 3rd': 3, 'minor 3rd up': 3,
+    'octave + 5th': 19, 'octave and a fifth': 19, 'octave fifth': 19,
+  };
+  const norm = (t) => t.toLowerCase().replace(/[_\-.]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  function levenshtein(a, b) {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...new Array(b.length).fill(0)]);
+    for (let j = 1; j <= b.length; j++) d[0][j] = j;
+    for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    return d[a.length][b.length];
+  }
+  const KNOWN_KEYS = () => [
+    'name', 'base', 'oscillator', 'harmonics', 'end harmonics', 'morph', 'unison', 'unison spread', 'layer 1', 'layer 2', 'layer 3',
+    'attack', 'decay', 'sustain', 'release',
+    ...PEDALS.flatMap((d) => [d.name.toLowerCase(), ...d.knobs.map((k) => `${d.name} ${k.label}`.toLowerCase())]),
+  ];
+  const suggest = (key) => {
+    let best = null;
+    for (const k of KNOWN_KEYS()) { const dd = levenshtein(key, k); if (!best || dd < best.d) best = { k, d: dd }; }
+    return best && best.d <= Math.max(2, key.length / 3) ? ` Did you mean "${best.k}"?` : '';
+  };
+
+  const findPedal = (word) => PEDALS.find((d) => PEDAL_ALIASES[d.id].includes(word)) ||
+    (word.length >= 3 ? PEDALS.find((d) => d.name.toLowerCase().startsWith(word)) : null);
+  function findKnob(def, words) {
+    const w = words.trim();
+    return def.knobs.find((k) => k.id === w || k.label.toLowerCase() === w || (KNOB_ALIASES[k.id] || []).includes(w)) ||
+      (w.length >= 2 ? def.knobs.find((k) => k.label.toLowerCase().startsWith(w)) : null);
+  }
+
+  // A knob value with optional units. Bare numbers get a sensible reading for that knob.
+  function parseKnobValue(raw, k) {
+    const s = raw.toLowerCase().replace(/\s+/g, '').replace('×', 'x');
+    const m = s.match(/^([+-]?\d*\.?\d+)(khz|hz|k|ms|sec|s|%|ct|cents?|x)?$/);
+    if (!m) return { error: `"${raw}" isn't a number` };
+    let v = parseFloat(m[1]);
+    const unit = m[2] || '';
+    if (k.fmt === sec) v = unit === 'ms' ? v / 1000 : unit ? v : v > 10 ? v / 1000 : v; // bare: >10 means ms
+    else if (k.fmt === hz || k.fmt === khz) v = unit === 'k' || unit === 'khz' ? v * 1000 : !unit && k.min >= 20 && v < 20 ? v * 1000 : v;
+    else if (k.fmt === pct) v = unit === '%' || (!unit && v > 1) ? v / 100 : v;
+    const c = Math.max(k.min, Math.min(k.max, v));
+    return { value: c, clamped: c !== v };
+  }
+
+  function parseHarmonics(raw) {
+    const s = raw.toLowerCase().replace(/\s+/g, ' ').trim(); // (keep dots: 1/n^1.5)
+    if (s === 'saw' || s === 'sawtooth') return H((n) => 1 / n);
+    if (s === 'square') return H((n) => (n % 2 ? 1 / n : 0));
+    if (s === 'triangle' || s === 'tri') return H((n) => (n % 2 ? 1 / (n * n) : 0));
+    if (s === 'sine' || s === 'sin') return [1];
+    const f = s.replace(/\s+/g, '').match(/^(odd)?1\/n(?:\^([\d.]+))?$/);
+    if (f) { const pw = f[2] ? +f[2] : 1; return H((n) => (f[1] && n % 2 === 0 ? 0 : Math.pow(n, -pw))); }
+    const nums = raw.split(/[,;\s]+/).filter(Boolean).map((t) => (t.endsWith('%') ? parseFloat(t) / 100 : parseFloat(t)));
+    if (!nums.length || nums.some((x) => !isFinite(x) || x < 0)) return null;
+    return nums.slice(0, HARMS);
+  }
+
+  function parseLayer(raw) {
+    const s = norm(raw);
+    if (s === 'off' || s === 'none') return 'off';
+    const parts = raw.split(',').map((t) => t.trim()).filter(Boolean);
+    const iv = norm(parts[0] || '');
+    let semis = INTERVAL_WORDS[iv];
+    if (semis == null) { const m = iv.match(/^([+-]?\d+)/); if (m) semis = +m[1]; }
+    if (semis == null) { const opt = INTERVALS.find(([, t]) => t.toLowerCase() === iv); if (opt) semis = opt[0]; }
+    if (semis == null || Math.abs(semis) > 36) return { error: `don't know the interval "${parts[0]}" (try "octave down", "5th up" or a number of semitones like +7)` };
+    let level = 0.4, detune = 0;
+    for (const t of parts.slice(1)) {
+      const tt = t.toLowerCase().replace(/\s+/g, '');
+      if (/(ct|cents?)$/.test(tt)) detune = Math.max(-50, Math.min(50, parseFloat(tt)));
+      else { const v = parseFloat(tt); if (isFinite(v)) level = Math.max(0, Math.min(1, tt.endsWith('%') || v > 1 ? v / 100 : v)); }
+    }
+    return { semis, level, detune };
+  }
+
+  function parsePresetText(text) {
+    const notes = [];
+    let name = null, base = null, wave = null, harm = null, harmEnd = null, morphTime = null, morphOff = false;
+    let uni = null;
+    const layerSpecs = [undefined, undefined, undefined];
+    let layerAuto = 0, layersTouched = false;
+    const pedalSet = {}; // id -> { on, knobs }
+    const pedalOf = (id) => (pedalSet[id] = pedalSet[id] || { on: undefined, knobs: {} });
+    text.split(/\r?\n/).forEach((line, idx) => {
+      const ln = idx + 1;
+      const clean = line.replace(/(#|\/\/).*$/, '').trim();
+      if (!clean) return;
+      const eq = clean.search(/[=:]/);
+      if (eq < 0) {
+        if (!name) {
+          // a bare first line names the sound; if it's an existing preset's name, start from that preset
+          name = clean;
+          if (!base) base = [...PRESETS, ...userPresets].find((pp) => norm(pp.name) === norm(clean)) || null;
+          return;
+        }
+        notes.push(`Line ${ln}: expected "setting = value".`);
+        return;
+      }
+      const key = norm(clean.slice(0, eq)), val = clean.slice(eq + 1).trim();
+      const v = norm(val);
+      const onOff = v === 'on' || v === 'yes' || v === 'true' ? true : v === 'off' || v === 'no' || v === 'false' || v === 'bypass' ? false : null;
+      if (['name', 'title', 'preset'].includes(key)) { name = val; return; }
+      if (['base', 'based on', 'from', 'start from'].includes(key)) {
+        const all = [...PRESETS, ...userPresets];
+        base = all.find((p) => norm(p.name) === v) || null;
+        if (!base) notes.push(`Line ${ln}: no preset called "${val}".`);
+        return;
+      }
+      if (['oscillator', 'osc', 'wave', 'waveform', 'shape'].includes(key)) {
+        if (WAVE_NAMES[v]) { wave = WAVE_NAMES[v]; return; }
+        const h = parseHarmonics(val);
+        if (h) { harm = h; wave = 'custom'; return; }
+        notes.push(`Line ${ln}: oscillator should be sine, square, saw, triangle or custom.`);
+        return;
+      }
+      if (['harmonics', 'harm', 'start harmonics', 'start shape', 'start', 'partials'].includes(key)) {
+        const h = parseHarmonics(val);
+        if (h) { harm = h; wave = 'custom'; } else notes.push(`Line ${ln}: harmonics should be numbers like "1, 0.5, 0.25", or saw / square / triangle / 1/n^2.`);
+        return;
+      }
+      if (['end harmonics', 'end shape', 'end', 'end harm', 'end partials'].includes(key)) {
+        const h = parseHarmonics(val);
+        if (h) harmEnd = h; else notes.push(`Line ${ln}: couldn't read the end harmonics.`);
+        return;
+      }
+      if (['morph', 'morph time', 'change over note'].includes(key)) {
+        if (onOff === false) { morphOff = true; return; }
+        if (onOff === true) { morphTime = morphTime || 1; return; }
+        const r = parseKnobValue(val, { fmt: sec, min: 0.05, max: 5 });
+        if (r.error) notes.push(`Line ${ln}: morph should be a time like 1.2s, or off.`); else morphTime = r.value;
+        return;
+      }
+      if (key === 'unison' || key === 'unison voices' || key === 'voices') {
+        uni = uni || { voices: 1, spread: 15 };
+        if (onOff === false) { uni.voices = 1; return; }
+        const [a, b2] = val.split(',').map((t) => t.trim());
+        const n = parseInt(a, 10);
+        if (!isFinite(n)) { notes.push(`Line ${ln}: unison should be a number of voices (1-5).`); return; }
+        uni.voices = Math.max(1, Math.min(5, n));
+        if (b2) uni.spread = Math.max(0, Math.min(60, parseFloat(b2)));
+        return;
+      }
+      if (key === 'unison spread' || key === 'spread') {
+        uni = uni || { voices: 1, spread: 15 };
+        uni.spread = Math.max(0, Math.min(60, parseFloat(val) || 0));
+        return;
+      }
+      const lm = key.match(/^layer(?: (\d))?$/);
+      if (lm) {
+        layersTouched = true;
+        const i = lm[1] ? +lm[1] - 1 : layerAuto;
+        if (i < 0 || i > 2) { notes.push(`Line ${ln}: there are only 3 layers.`); return; }
+        const L = parseLayer(val);
+        if (L.error) { notes.push(`Line ${ln}: ${L.error}.`); return; }
+        layerSpecs[i] = L === 'off' ? null : L;
+        layerAuto = i + 1;
+        return;
+      }
+      // Pedal settings: "<pedal> = on/off", "<pedal> <knob> = value", or envelope knobs on their own.
+      const words = key.split(' ');
+      let def = findPedal(words[0]), rest = words.slice(1).join(' ');
+      if (!def || (!rest && onOff === null)) {
+        const envKnob = findKnob(PEDALS[0], key);
+        if (envKnob && !def) { def = PEDALS[0]; rest = key; }
+      }
+      if (!def) { notes.push(`Line ${ln}: don't know "${clean.slice(0, eq).trim()}".${suggest(key)}`); return; }
+      if (!rest) {
+        if (onOff === null) notes.push(`Line ${ln}: ${def.name} should be on or off.`);
+        else pedalOf(def.id).on = onOff;
+        return;
+      }
+      const k = findKnob(def, rest);
+      if (!k) { notes.push(`Line ${ln}: ${def.name} has no "${rest}" knob (it has ${def.knobs.map((kk) => kk.label.toLowerCase()).join(', ')}).`); return; }
+      const r = parseKnobValue(val, k);
+      if (r.error) { notes.push(`Line ${ln}: ${r.error}.`); return; }
+      if (r.clamped) notes.push(`Line ${ln}: ${def.name} ${k.label.toLowerCase()} limited to ${k.fmt(r.value)}.`);
+      pedalOf(def.id).knobs[k.id] = r.value;
+    });
+
+    // Build the preset: start from the base (if any), then apply what the text says.
+    const p = base ? JSON.parse(JSON.stringify(base)) : { fx: {} };
+    p.name = name || (base ? base.name + ' (edited)' : 'Text preset');
+    p.fx = p.fx || {};
+    if (wave && wave !== 'custom') { p.wave = wave; delete p.harm; delete p.coeffs; delete p.harmEnd; delete p.coeffsB; }
+    if (wave === 'custom') {
+      delete p.wave;
+      if (harm) { p.harm = harm; delete p.coeffs; }
+      else if (!p.harm && !p.coeffs) p.coeffs = { real: [...slotA.real], imag: [...slotA.imag] }; // use the wave maker's shape
+    }
+    if (harmEnd) { p.harmEnd = harmEnd; delete p.coeffsB; if (!morphTime && !p.morph) p.morph = 1; }
+    if (morphTime) p.morph = morphTime;
+    if (morphOff) { delete p.harmEnd; delete p.coeffsB; }
+    if (morphTime && !p.harmEnd && !p.coeffsB) notes.push('Morph needs "End harmonics = ..." to have something to change into.');
+    if ((p.harmEnd || p.coeffsB) && p.wave) notes.push('End harmonics only work with a custom oscillator, so they were ignored.');
+    if (layersTouched) p.layers = layerSpecs.map((l) => l || null);
+    if (uni) p.unison = uni;
+    for (const [id, set] of Object.entries(pedalSet)) {
+      const def = PEDALS.find((d) => d.id === id);
+      if (set.on === false) { delete p.fx[id]; continue; }
+      const defaults = Object.fromEntries(def.knobs.map((k) => [k.id, k.value]));
+      p.fx[id] = { ...defaults, ...(p.fx[id] || {}), ...set.knobs };
+    }
+    return { preset: p, notes };
+  }
+
+  // Current sound -> text (the same language, so it can be edited and pasted back).
+  const r3 = (x) => String(Math.round(x * 1000) / 1000);
+  function soundToText(name) {
+    const lines = [`Name = ${name || 'My sound'}`];
+    const waveName = { sawtooth: 'saw' }[wave] || wave;
+    lines.push(`Oscillator = ${waveName}`);
+    const mags = (slot) => {
+      const m = [];
+      for (let k = 1; k <= 32; k++) m.push(Math.hypot(slot.real[k], slot.imag[k]));
+      while (m.length > 1 && m[m.length - 1] < 0.001) m.pop();
+      return m.map(r3).join(', ');
+    };
+    if (wave === 'custom') {
+      lines.push(`Harmonics = ${mags(slotA)}`);
+      if (morph.on) lines.push(`End harmonics = ${mags(slotB)}`, `Morph = ${sec(morph.time).replace(' ', '')}`);
+      else lines.push('Morph = off');
+    }
+    layers.forEach((l, i) => {
+      if (!l.on) return lines.push(`Layer ${i + 1} = off`);
+      const label = (INTERVALS.find(([v]) => v === l.semis) || [, `${l.semis > 0 ? '+' : ''}${l.semis}`])[1];
+      lines.push(`Layer ${i + 1} = ${label.toLowerCase()}, ${Math.round(l.level * 100)}%${l.detune ? `, ${l.detune > 0 ? '+' : ''}${l.detune}ct` : ''}`);
+    });
+    lines.push(unison.voices > 1 ? `Unison = ${unison.voices}, ${unison.spread}ct` : 'Unison = off');
+    for (const def of PEDALS) {
+      const st = pedals[def.id];
+      lines.push('', `${def.name} = ${st.on ? 'on' : 'off'}`);
+      if (!st.on) continue;
+      for (const k of def.knobs) lines.push(`${def.id === 'env' ? '' : def.name + ' '}${k.label} = ${k.fmt(st.p[k.id]).replace(/\s+/g, '')}`);
+    }
+    return lines.join('\n');
+  }
+
+  $('ptPedalHelp').textContent = PEDALS.map((d) => `${d.name} (${d.knobs.map((k) => k.label.toLowerCase()).join(', ')})`).join('; ') + '.';
+  const ptEl = $('presetText'), ptMsg = $('presetTextMsg');
+  const showNotes = (notes, okText) => {
+    ptMsg.innerHTML = '';
+    if (okText) { const ok = document.createElement('div'); ok.className = 'pt-ok'; ok.textContent = okText; ptMsg.appendChild(ok); }
+    for (const n of notes) { const d = document.createElement('div'); d.className = 'pt-warn'; d.textContent = n; ptMsg.appendChild(d); }
+  };
+  function applyText() {
+    const { preset, notes } = parsePresetText(ptEl.value);
+    applyPreset(preset);
+    showNotes(notes, `Applied "${preset.name}".` + (notes.length ? ' Some lines need a look:' : ''));
+    return preset;
+  }
+  $('ptApply').addEventListener('click', applyText);
+  $('ptCurrent').addEventListener('click', () => {
+    const active = document.querySelector('#presets .preset[aria-pressed="true"]');
+    ptEl.value = soundToText(active ? active.textContent : 'My sound');
+    showNotes([], 'This is the current sound. Edit it and press Apply.');
+  });
+  $('ptSave').addEventListener('click', () => {
+    const preset = applyText();
+    userPresets.push(snapshot(preset.name.slice(0, 24)));
+    saveUserPresets();
+    renderPresets();
+    showNotes([], `Saved "${preset.name}" to your presets.`);
+  });
+  $('ptCopy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(ptEl.value); showNotes([], 'Copied.'); }
+    catch { ptEl.select(); showNotes([], 'Select-all done; copy with your device\'s copy command.'); }
+  });
+  $('presetTextBox').addEventListener('toggle', (e) => { if (e.target.open && !ptEl.value.trim()) $('ptCurrent').click(); });
+  ptEl.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); applyText(); } });
 
   // ---- Sheet music import (recognizer lives in omr.js) ----
   const omr = { img: null, result: null };
