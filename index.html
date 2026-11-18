@@ -15,6 +15,15 @@
     --scope-bg: #1c1a17;
     --scope-grid: #2e2b27;
     --scope-trace: #ff8a4c;
+    --key-white: #fbfaf7;
+    --key-white-text: #6b665e;
+    --key-black: #2a2723;
+    --key-black-text: #d8d2c8;
+    --roll-white: #ffffff;
+    --roll-black: #f3efe9;
+    --roll-line: #ece6dd;
+    --roll-octave: #cfc6b9;
+    --roll-head: rgba(196, 81, 31, .12);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -26,6 +35,15 @@
       --line: #34302b;
       --scope-bg: #0d0c0b;
       --scope-grid: #24211e;
+      --key-white: #d9d3ca;
+      --key-white-text: #3a3631;
+      --key-black: #0f0e0d;
+      --key-black-text: #9a948a;
+      --roll-white: #24211e;
+      --roll-black: #1a1816;
+      --roll-line: #2c2925;
+      --roll-octave: #46413a;
+      --roll-head: rgba(255, 138, 76, .14);
     }
   }
   * { box-sizing: border-box; }
@@ -82,6 +100,62 @@
   }
   .hint { margin-top: 12px; font-size: .8rem; color: var(--muted); text-align: center; }
   kbd { font-family: ui-monospace, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+
+  /* Piano roll */
+  .panel + .panel { margin-top: 16px; }
+  h2 { font-size: 1rem; margin: 0 0 12px; }
+  .transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 14px; }
+  .transport button {
+    font: inherit; font-size: .85rem; font-weight: 600;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .transport #play { background: var(--accent); border-color: var(--accent); color: #fff; min-width: 72px; }
+  .transport .bpm { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 160px; font-size: .85rem; }
+  .transport .bpm input { flex: 1; }
+  .transport .bpm span { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 56px; text-align: right; }
+
+  .roll {
+    display: grid;
+    grid-template-columns: 52px repeat(16, minmax(0, 1fr));
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    user-select: none;
+    touch-action: none;
+  }
+  .key {
+    font: 600 10px ui-monospace, monospace;
+    height: 18px;
+    display: flex; align-items: center; justify-content: flex-end;
+    padding: 0 6px;
+    border: none;
+    border-bottom: 1px solid var(--roll-line);
+    background: var(--key-white);
+    color: var(--key-white-text);
+    cursor: pointer;
+  }
+  .key.black { background: var(--key-black); color: var(--key-black-text); }
+  .key.c { border-bottom-color: var(--roll-octave); }
+  .key.on { background: var(--accent); color: #fff; }
+  .cell {
+    height: 18px;
+    border-left: 1px solid var(--roll-line);
+    border-bottom: 1px solid var(--roll-line);
+    background: var(--roll-white);
+    cursor: pointer;
+    padding: 0;
+  }
+  .cell.black { background: var(--roll-black); }
+  .cell.c { border-bottom-color: var(--roll-octave); }
+  .cell.beat { border-left-color: var(--roll-octave); }
+  .cell.head { box-shadow: inset 0 0 0 999px var(--roll-head); }
+  .cell.active { background: var(--accent); }
+  .cell.active.head { box-shadow: inset 0 0 0 999px rgba(255,255,255,.25); }
 </style>
 </head>
 <body>
@@ -114,6 +188,17 @@
     <button id="power">Start</button>
     <p class="hint"><kbd>Space</kbd> start/stop · <kbd>1</kbd>–<kbd>4</kbd> waveform</p>
   </div>
+
+  <div class="panel">
+    <h2>Piano roll</h2>
+    <div class="transport">
+      <button id="play">Play</button>
+      <button id="clear">Clear</button>
+      <label class="bpm" for="bpm">Tempo <input id="bpm" type="range" min="60" max="200" value="120"><span id="bpmVal"></span></label>
+    </div>
+    <div class="roll" id="roll"></div>
+    <p class="hint">Click or drag on the grid to draw notes · click a key to hear it · uses the oscillator's waveform, detune and volume</p>
+  </div>
 </main>
 
 <script>
@@ -122,7 +207,17 @@
   const freqEl = $('freq'), detuneEl = $('detune'), volEl = $('vol'), powerEl = $('power');
   const waveBtns = [...document.querySelectorAll('.waves button')];
 
-  let ctx, osc, gain, analyser, running = false, wave = 'sine';
+  let ctx, osc, gain, analyser, noteBus, noteVol, running = false, wave = 'sine';
+
+  const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+  const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
+  const midiName = (m) => NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1);
+  function nearestNote(f) {
+    const exact = 69 + 12 * Math.log2(f / 440);
+    const m = Math.round(exact);
+    const cents = Math.round((exact - m) * 100);
+    return midiName(m) + (cents ? (cents > 0 ? ' +' : ' ') + cents + 'ct' : '');
+  }
 
   // Slider position (0–1000) -> frequency on a log scale.
   const sliderToFreq = (v) => MIN_F * Math.pow(MAX_F / MIN_F, v / 1000);
@@ -131,7 +226,7 @@
 
   function updateLabels() {
     const f = freq();
-    $('freqVal').textContent = f >= 1000 ? (f / 1000).toFixed(2) + ' kHz' : f.toFixed(1) + ' Hz';
+    $('freqVal').textContent = (f >= 1000 ? (f / 1000).toFixed(2) + ' kHz' : f.toFixed(1) + ' Hz') + ' · ' + nearestNote(f);
     $('detuneVal').textContent = (+detuneEl.value > 0 ? '+' : '') + detuneEl.value + ' ct';
     $('volVal').textContent = volEl.value + '%';
   }
@@ -143,6 +238,13 @@
     analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
     gain.connect(ctx.destination);
+    // Piano-roll voices sum into noteBus (feeds the scope), then noteVol sets loudness.
+    noteBus = ctx.createGain();
+    noteVol = ctx.createGain();
+    noteVol.gain.value = vol() * 0.5;
+    noteBus.connect(analyser);
+    noteBus.connect(noteVol);
+    noteVol.connect(ctx.destination);
   }
 
   function start() {
@@ -196,7 +298,148 @@
   volEl.addEventListener('input', () => {
     updateLabels();
     if (running) gain.gain.setTargetAtTime(vol(), ctx.currentTime, 0.01);
+    if (noteVol) noteVol.gain.setTargetAtTime(vol() * 0.5, ctx.currentTime, 0.01);
   });
+
+  // ---- Piano roll ----
+  const LOW = 48, HIGH = 71, STEPS = 16; // C3–B4, one bar of 16th notes
+  const rows = [];
+  for (let m = HIGH; m >= LOW; m--) rows.push(m);
+  const isBlack = (m) => [1, 3, 6, 8, 10].includes(m % 12);
+  const pattern = new Set(); // keys like "midi:step"
+  const cells = {};          // "midi:step" -> element
+  const keyEls = {};
+  const rollEl = $('roll');
+
+  for (const m of rows) {
+    const key = document.createElement('button');
+    key.className = 'key' + (isBlack(m) ? ' black' : '') + (m % 12 === 0 ? ' c' : '');
+    key.textContent = midiName(m);
+    key.title = midiName(m) + ' · ' + midiToFreq(m).toFixed(1) + ' Hz';
+    key.addEventListener('pointerdown', () => { ensureAudio(); playNote(m, ctx.currentTime, 0.35); flashKey(m, 350); });
+    rollEl.appendChild(key);
+    keyEls[m] = key;
+    for (let s = 0; s < STEPS; s++) {
+      const c = document.createElement('div');
+      c.className = 'cell' + (isBlack(m) ? ' black' : '') + (m % 12 === 0 ? ' c' : '') + (s % 4 === 0 ? ' beat' : '');
+      c.dataset.id = m + ':' + s;
+      c.title = midiName(m) + ', step ' + (s + 1);
+      rollEl.appendChild(c);
+      cells[m + ':' + s] = c;
+    }
+  }
+
+  function setCell(id, on) {
+    if (on) pattern.add(id); else pattern.delete(id);
+    cells[id].classList.toggle('active', on);
+  }
+
+  // Click to toggle; drag to paint (or erase, if the drag started on a filled cell).
+  let painting = null;
+  rollEl.addEventListener('pointerdown', (e) => {
+    const c = e.target.closest('.cell');
+    if (!c) return;
+    e.preventDefault();
+    painting = !pattern.has(c.dataset.id);
+    setCell(c.dataset.id, painting);
+    if (painting) {
+      ensureAudio();
+      const m = +c.dataset.id.split(':')[0];
+      playNote(m, ctx.currentTime, 0.2);
+      flashKey(m, 200);
+    }
+  });
+  rollEl.addEventListener('pointermove', (e) => {
+    if (painting === null) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const c = el && el.closest('.cell');
+    if (c && pattern.has(c.dataset.id) !== painting) setCell(c.dataset.id, painting);
+  });
+  window.addEventListener('pointerup', () => (painting = null));
+
+  function ensureAudio() {
+    if (!ctx) initAudio();
+    ctx.resume();
+  }
+
+  function playNote(m, when, dur) {
+    const o = ctx.createOscillator();
+    const env = ctx.createGain();
+    o.type = wave;
+    o.frequency.value = midiToFreq(m);
+    o.detune.value = +detuneEl.value;
+    env.gain.setValueAtTime(0, when);
+    env.gain.linearRampToValueAtTime(1, when + 0.005);
+    env.gain.setTargetAtTime(0.7, when + 0.005, 0.08);
+    env.gain.setTargetAtTime(0, when + dur, 0.03);
+    o.connect(env);
+    env.connect(noteBus);
+    o.start(when);
+    o.stop(when + dur + 0.2);
+  }
+
+  const keyTimers = {};
+  function flashKey(m, ms) {
+    keyEls[m].classList.add('on');
+    clearTimeout(keyTimers[m]);
+    keyTimers[m] = setTimeout(() => keyEls[m].classList.remove('on'), ms);
+  }
+
+  // Lookahead scheduler: audio timing stays tight even if the UI thread stutters.
+  const bpmEl = $('bpm'), playEl = $('play');
+  let seqTimer = null, nextStep = 0, nextTime = 0, headQueue = [], headStep = -1;
+  const stepDur = () => 60 / +bpmEl.value / 4;
+
+  function schedule() {
+    while (nextTime < ctx.currentTime + 0.1) {
+      for (const m of rows) {
+        if (pattern.has(m + ':' + nextStep)) playNote(m, nextTime, stepDur() * 0.9);
+      }
+      headQueue.push({ step: nextStep, time: nextTime });
+      nextTime += stepDur();
+      nextStep = (nextStep + 1) % STEPS;
+    }
+  }
+
+  function setHead(step) {
+    if (step === headStep) return;
+    for (const m of rows) {
+      if (headStep >= 0) cells[m + ':' + headStep].classList.remove('head');
+      if (step >= 0) cells[m + ':' + step].classList.add('head');
+    }
+    if (step >= 0) for (const m of rows) if (pattern.has(m + ':' + step)) flashKey(m, stepDur() * 900);
+    headStep = step;
+  }
+
+  function updateHead() {
+    if (!ctx) return;
+    while (headQueue.length && headQueue[0].time <= ctx.currentTime) setHead(headQueue.shift().step);
+  }
+
+  playEl.addEventListener('click', () => {
+    if (seqTimer) {
+      clearInterval(seqTimer);
+      seqTimer = null;
+      headQueue = [];
+      setHead(-1);
+      playEl.textContent = 'Play';
+      return;
+    }
+    ensureAudio();
+    nextStep = 0;
+    nextTime = ctx.currentTime + 0.05;
+    schedule();
+    seqTimer = setInterval(schedule, 25);
+    playEl.textContent = 'Stop';
+  });
+  $('clear').addEventListener('click', () => [...pattern].forEach((id) => setCell(id, false)));
+  const updateBpm = () => ($('bpmVal').textContent = bpmEl.value + ' BPM');
+  bpmEl.addEventListener('input', updateBpm);
+  updateBpm();
+
+  // A short starter arpeggio so Play does something right away.
+  [[60, 0], [64, 2], [67, 4], [71, 6], [69, 8], [67, 10], [64, 12], [62, 14]]
+    .forEach(([m, s]) => setCell(m + ':' + s, true));
 
   document.addEventListener('keydown', (e) => {
     if (e.code === 'Space') { e.preventDefault(); toggle(); }
@@ -211,6 +454,7 @@
 
   function draw() {
     requestAnimationFrame(draw);
+    updateHead();
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth, h = canvas.clientHeight;
     if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
