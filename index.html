@@ -383,6 +383,33 @@
   .morph-row input { flex: 1; accent-color: var(--accent); }
   .morph-row span { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; }
   .morph-row.off { opacity: .45; }
+
+  /* Layers */
+  .layers { display: grid; gap: 8px; margin-bottom: 10px; }
+  .layer {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 6px 12px;
+    font-size: .8rem;
+    color: var(--muted);
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .layer.off .layer-ctl { opacity: .45; }
+  .layer input[type=checkbox] { accent-color: var(--accent); width: 18px; height: 18px; margin: 0; }
+  .layer label { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .layer input[type=range], .unison input { width: 100%; accent-color: var(--accent); }
+  .layer select { width: 100%; padding: 5px 6px; }
+  .unison { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; font-size: .85rem; }
+  .unison label { display: flex; align-items: center; gap: 8px; }
+  .unison span { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 62px; text-align: right; white-space: nowrap; }
+  @media (max-width: 520px) {
+    .layer { grid-template-columns: auto 1fr; }
+    .layer .layer-lvl, .layer .layer-det { grid-column: 2; }
+    .unison { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -422,6 +449,14 @@
     <p class="flow">Each preset sets the waveform, envelope and pedals. Tweak anything afterwards, then save it as your own.</p>
     <div class="presets" id="presets"></div>
     <button class="btn" id="savePreset">Save current sound…</button>
+
+    <h3>Layers</h3>
+    <p class="flow">Stack extra copies of the oscillator on every note, at an octave or a fifth away. Unison adds slightly detuned copies spread left and right for a thicker sound.</p>
+    <div class="layers" id="layers"></div>
+    <div class="unison">
+      <label>Unison <input type="range" id="uniVoices" min="1" max="5" step="1" value="1"><span id="uniVoicesVal"></span></label>
+      <label>Spread <input type="range" id="uniSpread" min="0" max="60" step="1" value="15"><span id="uniSpreadVal"></span></label>
+    </div>
 
     <h3>Wave maker</h3>
     <p class="flow">Draw one cycle of a wave, or drag the harmonic bars (1 = the note itself, 2 = an octave up, and so on). Give it a different <b>end of note</b> shape and every note morphs from one to the other, the way a piano starts bright and mellows. Editing switches the oscillator to <b>Custom</b>.</p>
@@ -625,21 +660,58 @@
     if (wave === 'custom') o.setPeriodicWave(waveFor(o.role === 'B' ? slotB : slotA));
     else o.type = wave;
   }
-  // Oscillator(s) for one note, connected to `dest` and started at t0. Returns them.
+  // Layered voices: the main oscillator plus up to three copies at other intervals, each optionally
+  // multiplied into detuned unison voices spread across the stereo field.
+  const layers = [
+    { on: false, semis: -12, level: 0.5, detune: 0 },
+    { on: false, semis: 7, level: 0.35, detune: 0 },
+    { on: false, semis: 12, level: 0.35, detune: 0 },
+  ];
+  const unison = { voices: 1, spread: 15 }; // spread in cents between the outermost voices
+  const offsetOf = (o) => (o.layer >= 0 ? layers[o.layer].detune : 0) + (unison.spread / 2) * o.u;
+
+  // Oscillators for one note, connected to `dest` and started at t0. Returns them.
   function makeSource(dest, hz, t0) {
+    const parts = [{ layer: -1, semis: 0, level: 1 }];
+    layers.forEach((l, i) => l.on && parts.push({ layer: i, semis: l.semis, level: l.level }));
+    const n = unison.voices;
+    const norm = 1 / (Math.sqrt(n) * Math.max(1, parts.reduce((t, p) => t + p.level, 0) * 0.75));
+    const oscs = [];
+    for (const part of parts) {
+      const ratio = Math.pow(2, part.semis / 12);
+      for (let i = 0; i < n; i++) {
+        const u = n > 1 ? (i / (n - 1)) * 2 - 1 : 0; // -1 .. 1 across the unison voices
+        const pg = ctx.createGain();
+        pg.norm = norm;
+        pg.gain.value = (part.layer >= 0 ? layers[part.layer].level : 1) * norm;
+        let out = pg;
+        if (n > 1 && ctx.createStereoPanner) {
+          const pan = ctx.createStereoPanner();
+          pan.pan.value = u * 0.7;
+          pg.connect(pan);
+          out = pan;
+        }
+        out.connect(dest);
+        oscs.push(...morphPair(pg, hz * ratio, t0, { layer: part.layer, u, ratio, partGain: pg }));
+      }
+    }
+    return oscs;
+  }
+
+  // One voice: a single oscillator, or (with morphing) two phase-locked ones crossfading from the
+  // start shape to the end shape, fast at first and then easing off, like harmonics dying away.
+  function morphPair(dest, hz, t0, meta) {
     const make = (role) => {
       const o = ctx.createOscillator();
-      o.role = role;
+      Object.assign(o, meta, { role });
       applyWave(o);
       o.frequency.value = hz;
-      o.detune.value = +detuneEl.value;
+      o.detune.value = +detuneEl.value + offsetOf(o);
       o.start(t0);
       return o;
     };
     const a = make('A');
     if (!(wave === 'custom' && morph.on)) { a.connect(dest); return [a]; }
-    // Two phase-locked oscillators: crossfading them morphs the harmonics from shape A to B.
-    // The curve is fast at first and then eases off, like harmonics dying away.
     const b = make('B'), ga = ctx.createGain(), gb = ctx.createGain(), tc = morph.time / 3;
     ga.gain.setValueAtTime(1, t0);
     ga.gain.setTargetAtTime(0, t0, tc);
@@ -651,6 +723,16 @@
     gb.connect(dest);
     return [a, b];
   }
+  // Apply layer level / detune / unison spread changes to notes already sounding.
+  function layersChanged() {
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    for (const o of liveOscs()) {
+      o.detune.setTargetAtTime(+detuneEl.value + offsetOf(o), t, 0.02);
+      if (o.layer >= 0 && o.role === 'A') o.partGain.gain.setTargetAtTime(layers[o.layer].level * o.partGain.norm, t, 0.02);
+    }
+  }
+
   // Every oscillator that is sounding (or scheduled to start soon): the drone plus piano-roll notes.
   // Waveform and detune changes are applied to all of them, so you can change the sound mid-note.
   const voices = new Set();
@@ -671,11 +753,11 @@
 
   freqEl.addEventListener('input', () => {
     updateLabels();
-    if (drone) drone.oscs.forEach((o) => o.frequency.setTargetAtTime(freq(), ctx.currentTime, 0.01));
+    if (drone) drone.oscs.forEach((o) => o.frequency.setTargetAtTime(freq() * o.ratio, ctx.currentTime, 0.01));
   });
   detuneEl.addEventListener('input', () => {
     updateLabels();
-    liveOscs().forEach((o) => o.detune.setTargetAtTime(+detuneEl.value, ctx.currentTime, 0.01));
+    liveOscs().forEach((o) => o.detune.setTargetAtTime(+detuneEl.value + offsetOf(o), ctx.currentTime, 0.01));
   });
   volEl.addEventListener('input', () => {
     updateLabels();
@@ -1542,6 +1624,56 @@
   synthShape();
   setMorph(false, 1);
 
+  // ---- Layers UI ----
+  const INTERVALS = [[-24, '2 octaves down'], [-12, 'Octave down'], [-7, '5th down'], [-5, '4th down'], [3, 'Minor 3rd up'],
+    [4, 'Major 3rd up'], [5, '4th up'], [7, '5th up'], [12, 'Octave up'], [19, 'Octave + 5th'], [24, '2 octaves up']];
+  const layerEls = [];
+  layers.forEach((l, i) => {
+    const row = document.createElement('div');
+    row.className = 'layer';
+    row.innerHTML = `
+      <input type="checkbox" aria-label="Layer ${i + 1} on">
+      <label class="layer-ctl">Interval <select>${INTERVALS.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
+      <label class="layer-ctl layer-lvl">Level <input type="range" min="0" max="100"></label>
+      <label class="layer-ctl layer-det">Fine tune <input type="range" min="-50" max="50"></label>`;
+    const [on, sel, lvl, det] = row.querySelectorAll('input, select');
+    const sync = () => {
+      on.checked = l.on;
+      sel.value = String(l.semis);
+      lvl.value = Math.round(l.level * 100);
+      det.value = l.detune;
+      det.title = `${l.detune > 0 ? '+' : ''}${l.detune} cents`;
+      row.classList.toggle('off', !l.on);
+    };
+    on.addEventListener('change', () => { l.on = on.checked; sync(); clearPresetHighlight(); });
+    sel.addEventListener('change', () => { l.semis = +sel.value; if (!l.on) l.on = true; sync(); clearPresetHighlight(); });
+    lvl.addEventListener('input', () => { l.level = +lvl.value / 100; layersChanged(); clearPresetHighlight(); });
+    det.addEventListener('input', () => { l.detune = +det.value; sync(); layersChanged(); clearPresetHighlight(); });
+    layerEls.push(sync);
+    sync();
+    $('layers').appendChild(row);
+  });
+  const uniVoicesEl = $('uniVoices'), uniSpreadEl = $('uniSpread');
+  function syncUnison() {
+    uniVoicesEl.value = unison.voices;
+    uniSpreadEl.value = unison.spread;
+    $('uniVoicesVal').textContent = unison.voices === 1 ? 'off' : unison.voices + ' voices';
+    $('uniSpreadVal').textContent = unison.spread + ' ct';
+  }
+  uniVoicesEl.addEventListener('input', () => { unison.voices = +uniVoicesEl.value; syncUnison(); clearPresetHighlight(); });
+  uniSpreadEl.addEventListener('input', () => { unison.spread = +uniSpreadEl.value; syncUnison(); layersChanged(); clearPresetHighlight(); });
+  syncUnison();
+  function setLayers(list = [], uni = {}) {
+    layers.forEach((l, i) => {
+      const c = list[i];
+      Object.assign(l, c ? { on: true, semis: c.semis, level: c.level ?? 0.4, detune: c.detune ?? 0 } : { on: false });
+      layerEls[i]();
+    });
+    unison.voices = uni.voices || 1;
+    unison.spread = uni.spread ?? 15;
+    syncUnison();
+  }
+
   // ---- Instrument presets ----
   // `harm` = harmonic amplitudes (1st, 2nd, 3rd...) for the Custom wave; or `wave` = a basic waveform.
   // `fx` = pedals to switch on, with their knob settings (pedals left out are switched off).
@@ -1551,9 +1683,9 @@
       fx: { env: { a: 0.003, d: 1.4, s: 0, r: 0.35 }, filter: { cutoff: 5000, q: 0.7 }, reverb: { decay: 1.8, tone: 6000, mix: 0.2 } } },
     { name: 'E. piano', harm: H((n) => ({ 1: 1, 2: 0.5, 3: 0.2, 7: 0.35, 8: 0.25, 14: 0.15 })[n] || 0), harmEnd: H((n) => [1, 0.15, 0.04][n - 1] || 0), morph: 0.5,
       fx: { env: { a: 0.003, d: 2, s: 0.15, r: 0.45 }, chorus: { rate: 0.6, depth: 0.45, mix: 0.7 }, reverb: { decay: 1.5, tone: 5000, mix: 0.15 } } },
-    { name: 'Organ', harm: H((n) => ({ 1: 1, 2: 0.8, 3: 0.6, 4: 0.5, 6: 0.35, 8: 0.3, 10: 0.1, 12: 0.15, 16: 0.1 })[n] || 0),
+    { name: 'Organ', layers: [{ semis: -12, level: 0.35 }], harm: H((n) => ({ 1: 1, 2: 0.8, 3: 0.6, 4: 0.5, 6: 0.35, 8: 0.3, 10: 0.1, 12: 0.15, 16: 0.1 })[n] || 0),
       fx: { env: { a: 0.005, d: 0.05, s: 1, r: 0.06 }, drive: { drive: 2.5, level: 0.7, mix: 0.4 }, chorus: { rate: 5.5, depth: 0.3, mix: 0.5 }, reverb: { decay: 2, tone: 5000, mix: 0.2 } } },
-    { name: 'Strings', harm: H((n) => Math.pow(n, -1.6)), harmEnd: H((n) => 1 / n), morph: 0.5,
+    { name: 'Strings', harm: H((n) => Math.pow(n, -1.6)), harmEnd: H((n) => 1 / n), morph: 0.5, unison: { voices: 3, spread: 12 },
       fx: { env: { a: 0.4, d: 0.3, s: 0.9, r: 0.7 }, filter: { cutoff: 3500, q: 0.7 }, chorus: { rate: 0.3, depth: 0.7, mix: 0.8 }, reverb: { decay: 3, tone: 6000, mix: 0.35 } } },
     { name: 'Brass', harm: H((n) => Math.pow(n, -2.4)), harmEnd: H((n) => (1 / n) * (n <= 6 ? 1 : 0.6)), morph: 0.25,
       fx: { env: { a: 0.07, d: 0.2, s: 0.75, r: 0.15 }, filter: { cutoff: 2400, q: 2 }, reverb: { decay: 1.6, tone: 5000, mix: 0.2 } } },
@@ -1561,16 +1693,18 @@
       fx: { env: { a: 0.09, d: 0.1, s: 0.9, r: 0.2 }, reverb: { decay: 2.2, tone: 7000, mix: 0.3 } } },
     { name: 'Clarinet', harm: H((n) => (n % 2 ? 1 / n : 0.02)),
       fx: { env: { a: 0.04, d: 0.1, s: 0.9, r: 0.15 }, filter: { cutoff: 3000, q: 0.8 }, reverb: { decay: 1.8, tone: 5000, mix: 0.2 } } },
-    { name: 'Bass', harm: H((n) => Math.pow(n, -0.9)), harmEnd: H((n) => Math.pow(n, -2.2)), morph: 0.4,
+    { name: 'Bass', layers: [{ semis: -12, level: 0.45 }], harm: H((n) => Math.pow(n, -0.9)), harmEnd: H((n) => Math.pow(n, -2.2)), morph: 0.4,
       fx: { env: { a: 0.004, d: 0.5, s: 0.35, r: 0.1 }, drive: { drive: 4, level: 0.6, mix: 0.3 }, filter: { cutoff: 900, q: 3 } } },
     { name: 'Pluck', harm: H((n) => Math.pow(n, -0.8)), harmEnd: H((n) => Math.pow(n, -2.6)), morph: 0.35,
       fx: { env: { a: 0.002, d: 0.45, s: 0, r: 0.3 }, filter: { cutoff: 3500, q: 1.5 }, delay: { time: 0.3, feedback: 0.35, mix: 0.3 }, reverb: { decay: 1.5, tone: 5000, mix: 0.2 } } },
     { name: 'Bell', harm: H((n) => ({ 1: 1, 3: 0.5, 5: 0.25, 7: 0.6, 11: 0.5, 13: 0.4, 17: 0.3, 23: 0.2 })[n] || 0), harmEnd: H((n) => ({ 1: 1, 3: 0.15 })[n] || 0), morph: 2,
       fx: { env: { a: 0.002, d: 2.5, s: 0, r: 1.5 }, delay: { time: 0.45, feedback: 0.25, mix: 0.2 }, reverb: { decay: 4, tone: 8000, mix: 0.4 } } },
-    { name: 'Lead', wave: 'square',
+    { name: 'Lead', wave: 'square', unison: { voices: 2, spread: 12 }, layers: [{ semis: 12, level: 0.2 }],
       fx: { env: { a: 0.01, d: 0.2, s: 0.8, r: 0.15 }, drive: { drive: 8, level: 0.5, mix: 0.5 }, filter: { cutoff: 3000, q: 4 }, delay: { time: 0.35, feedback: 0.4, mix: 0.25 } } },
-    { name: 'Pad', harm: H((n) => Math.pow(n, -3)), harmEnd: H((n) => 1 / n), morph: 2.5,
+    { name: 'Pad', unison: { voices: 3, spread: 18 }, layers: [{ semis: 12, level: 0.25 }, { semis: 7, level: 0.15 }], harm: H((n) => Math.pow(n, -3)), harmEnd: H((n) => 1 / n), morph: 2.5,
       fx: { env: { a: 1.2, d: 1, s: 0.8, r: 2 }, filter: { cutoff: 1800, q: 1 }, chorus: { rate: 0.4, depth: 0.8, mix: 1 }, phaser: { rate: 0.1, depth: 0.6, feedback: 0.3, mix: 0.6 }, reverb: { decay: 6, tone: 5000, mix: 0.5 } } },
+    { name: 'Supersaw', wave: 'sawtooth', unison: { voices: 5, spread: 35 }, layers: [{ semis: -12, level: 0.4 }],
+      fx: { env: { a: 0.02, d: 0.3, s: 0.85, r: 0.35 }, filter: { cutoff: 5000, q: 1 }, chorus: { rate: 0.4, depth: 0.4, mix: 0.4 }, delay: { time: 0.3, feedback: 0.3, mix: 0.2 }, reverb: { decay: 2.5, tone: 6000, mix: 0.3 } } },
     { name: 'Chiptune', harm: H((n) => Math.abs(Math.sin(Math.PI * n * 0.25)) / n), // 25% pulse
       fx: { env: { a: 0.002, d: 0.05, s: 0.9, r: 0.03 } } },
     { name: 'Plain sine', wave: 'sine', fx: { env: { a: 0.01, d: 0.3, s: 0.8, r: 0.2 } } },
@@ -1596,6 +1730,7 @@
       setMorph(false);
       setWave(p.wave || 'sine');
     }
+    setLayers(p.layers, p.unison);
     for (const def of PEDALS) {
       const st = pedals[def.id], cfg = p.fx[def.id];
       if (cfg) for (const k of def.knobs) st.knobs[k.id].setValue(cfg[k.id] ?? k.value);
@@ -1615,7 +1750,8 @@
     for (const def of PEDALS) if (pedals[def.id].on) fx[def.id] = { ...pedals[def.id].p };
     const c = (slot) => ({ real: [...slot.real], imag: [...slot.imag] });
     const isCustom = wave === 'custom';
-    return { name, wave, coeffs: isCustom ? c(slotA) : null, coeffsB: isCustom && morph.on ? c(slotB) : null, morph: morph.time, fx };
+    const lay = layers.filter((l) => l.on).map((l) => ({ semis: l.semis, level: l.level, detune: l.detune }));
+    return { name, wave, coeffs: isCustom ? c(slotA) : null, coeffsB: isCustom && morph.on ? c(slotB) : null, morph: morph.time, layers: lay, unison: { ...unison }, fx };
   }
   function renderPresets() {
     const box = $('presets');
