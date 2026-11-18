@@ -75,7 +75,7 @@
     background: var(--scope-bg);
     margin-bottom: 20px;
   }
-  .waves { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 20px; }
+  .waves { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 20px; }
   .waves button {
     font: inherit; font-size: .85rem;
     padding: 10px 4px;
@@ -240,7 +240,7 @@
   .flow { margin: -4px 0 14px; font-size: .8rem; color: var(--muted); }
   .pedalboard {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 12px;
   }
   @media (max-width: 520px) { .pedalboard { grid-template-columns: repeat(2, 1fr); } }
@@ -348,6 +348,31 @@
   .omr-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-size: .85rem; }
   .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: .75rem; color: var(--muted); margin: -4px 0 10px; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+
+  /* Instruments + wave maker */
+  h3 { font-size: .9rem; margin: 22px 0 6px; }
+  .presets { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .preset {
+    font: inherit; font-size: .85rem;
+    padding: 7px 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .preset[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .preset.user { border-style: dashed; }
+  .preset-user { display: inline-flex; align-items: center; }
+  .preset-del {
+    font: inherit; font-size: 1rem; line-height: 1;
+    border: none; background: transparent; color: var(--muted);
+    padding: 4px 6px; margin-left: -2px; cursor: pointer;
+  }
+  .wave-draw { width: 100%; height: 150px; display: block; border-radius: 8px; touch-action: none; cursor: crosshair; }
+  .harm-bars { width: 100%; height: 90px; display: block; margin-top: 8px; touch-action: none; cursor: ns-resize; }
+  .wm-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 10px; font-size: .85rem; color: var(--muted); }
+  .wm-tools .btn { padding: 6px 10px; font-weight: 500; }
 </style>
 </head>
 <body>
@@ -362,6 +387,7 @@
       <button data-wave="square" aria-pressed="false">Square</button>
       <button data-wave="sawtooth" aria-pressed="false">Saw</button>
       <button data-wave="triangle" aria-pressed="false">Triangle</button>
+      <button data-wave="custom" aria-pressed="false" title="Edit it in the Wave maker">Custom</button>
     </div>
 
     <div class="control">
@@ -378,7 +404,28 @@
     </div>
 
     <button id="power">Start</button>
-    <p class="hint"><kbd>Space</kbd> start/stop · <kbd>1</kbd>–<kbd>4</kbd> waveform</p>
+    <p class="hint"><kbd>Space</kbd> start/stop · <kbd>1</kbd>–<kbd>5</kbd> waveform</p>
+  </div>
+
+  <div class="panel" id="soundPanel">
+    <h2>Instruments</h2>
+    <p class="flow">Each preset sets the waveform, envelope and pedals. Tweak anything afterwards, then save it as your own.</p>
+    <div class="presets" id="presets"></div>
+    <button class="btn" id="savePreset">Save current sound…</button>
+
+    <h3>Wave maker</h3>
+    <p class="flow">Draw one cycle of a wave, or drag the harmonic bars (1 = the note itself, 2 = an octave up, and so on). Editing switches the oscillator to <b>Custom</b>.</p>
+    <canvas id="waveDraw" class="wave-draw" aria-label="Draw a waveform"></canvas>
+    <canvas id="harmBars" class="harm-bars" aria-label="Harmonic levels"></canvas>
+    <div class="wm-tools">
+      <span>Start from:</span>
+      <button class="btn" data-template="sine">Sine</button>
+      <button class="btn" data-template="saw">Saw</button>
+      <button class="btn" data-template="square">Square</button>
+      <button class="btn" data-template="triangle">Triangle</button>
+      <button class="btn" data-template="random">Random</button>
+      <button class="btn" id="smoothWave">Smooth</button>
+    </div>
   </div>
 
   <div class="panel">
@@ -440,7 +487,7 @@
 
   <div class="panel">
     <h2>Pedalboard</h2>
-    <p class="flow">Envelope shapes every note, then the signal runs Chorus → Flanger → Phaser → Delay → Reverb. Drag a knob up or down; double-click to reset.</p>
+    <p class="flow">Envelope shapes every note, then the signal runs Drive → Filter → Chorus → Flanger → Phaser → Delay → Reverb. Drag a knob up or down; double-click to reset.</p>
     <div class="pedalboard" id="pedalboard"></div>
   </div>
 </main>
@@ -522,7 +569,7 @@
     ensureAudio();
     const t = ctx.currentTime, e = envParams();
     osc = ctx.createOscillator();
-    osc.type = wave;
+    applyWave(osc);
     osc.frequency.value = freq();
     osc.detune.value = +detuneEl.value;
     const env = ctx.createGain();
@@ -546,10 +593,27 @@
 
   const toggle = () => (running ? stop() : start());
 
+  // Custom waveform: Fourier coefficients edited in the Wave maker (index 0 = DC, unused).
+  const HARMS = 64;
+  const custom = { real: new Float32Array(HARMS + 1), imag: new Float32Array(HARMS + 1), wave: null };
+  custom.imag[1] = 1; // starts as a sine
+  function customWave() {
+    if (!custom.wave) custom.wave = ctx.createPeriodicWave(custom.real, custom.imag);
+    return custom.wave;
+  }
+  function applyWave(o) {
+    if (wave === 'custom') o.setPeriodicWave(customWave());
+    else o.type = wave;
+  }
+  function customChanged() {
+    custom.wave = null;
+    if (osc && wave === 'custom') applyWave(osc);
+  }
+
   function setWave(w) {
     wave = w;
     waveBtns.forEach((b) => b.setAttribute('aria-pressed', b.dataset.wave === w));
-    if (osc) osc.type = w;
+    if (osc) applyWave(osc);
   }
 
   powerEl.addEventListener('click', toggle);
@@ -570,7 +634,7 @@
 
   document.addEventListener('keydown', (e) => {
     if (e.code === 'Space') { e.preventDefault(); toggle(); } // also stops a focused button from clicking
-    const i = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code);
+    const i = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(e.code);
     if (i >= 0) setWave(waveBtns[i].dataset.wave);
   });
 
@@ -737,7 +801,7 @@
   function playNote(m, when, dur) {
     const o = ctx.createOscillator();
     const env = ctx.createGain();
-    o.type = wave;
+    applyWave(o);
     o.frequency.value = midiToFreq(m);
     o.detune.value = +detuneEl.value;
     env.gain.value = 0;
@@ -877,6 +941,46 @@
         { id: 's', label: 'Sustain', min: 0, max: 1, value: 0.6, fmt: pct },
         { id: 'r', label: 'Release', min: 0.01, max: 3, value: 0.4, log: true, fmt: sec },
       ],
+    },
+    {
+      id: 'drive', name: 'Drive', color: '#e98b7f', ink: '#3b0d0d', mode: 'crossfade',
+      knobs: [
+        { id: 'drive', label: 'Drive', min: 1, max: 40, value: 6, log: true, fmt: (v) => v.toFixed(1) + '×' },
+        { id: 'level', label: 'Level', min: 0.05, max: 1, value: 0.5, fmt: pct },
+        { id: 'mix', label: 'Mix', min: 0, max: 1, value: 1, fmt: pct },
+      ],
+      build(ctx) {
+        const shaper = ctx.createWaveShaper(), post = ctx.createGain();
+        shaper.oversample = '4x';
+        shaper.connect(post);
+        let last = 0;
+        return {
+          input: shaper, output: post,
+          set(p) {
+            smooth(post.gain, p.level);
+            if (p.drive === last) return;
+            last = p.drive;
+            const curve = new Float32Array(1024), k = p.drive;
+            for (let i = 0; i < curve.length; i++) {
+              const x = (i / (curve.length - 1)) * 2 - 1;
+              curve[i] = Math.tanh(k * x) / Math.tanh(k); // soft clipping
+            }
+            shaper.curve = curve;
+          },
+        };
+      },
+    },
+    {
+      id: 'filter', name: 'Filter', color: '#f0cf63', ink: '#3b2f05', mode: 'insert',
+      knobs: [
+        { id: 'cutoff', label: 'Cutoff', min: 80, max: 16000, value: 2500, log: true, fmt: khz },
+        { id: 'q', label: 'Reso', min: 0.5, max: 18, value: 1, log: true, fmt: (v) => v.toFixed(1) },
+      ],
+      build(ctx) {
+        const f = ctx.createBiquadFilter();
+        f.type = 'lowpass';
+        return { input: f, output: f, set(p) { smooth(f.frequency, p.cutoff); smooth(f.Q, p.q); } };
+      },
     },
     {
       id: 'chorus', name: 'Chorus', color: '#7cc4b8', ink: '#0f2e2a', blend: true,
@@ -1019,9 +1123,20 @@
 
   function applyMix(st) {
     if (!st.fx) return;
+    const { mode, blend } = st.def;
+    if (mode === 'insert') { // the whole signal goes through it (a filter has no wet/dry)
+      smooth(st.fx.dry.gain, st.on ? 0 : 1);
+      smooth(st.fx.wet.gain, st.on ? 1 : 0);
+      return;
+    }
     const mix = st.on ? st.p.mix : 0;
-    smooth(st.fx.dry.gain, st.def.blend ? 1 - 0.5 * mix : 1);
-    smooth(st.fx.wet.gain, st.def.blend ? 0.5 * mix : mix);
+    if (mode === 'crossfade') {
+      smooth(st.fx.dry.gain, 1 - mix);
+      smooth(st.fx.wet.gain, mix);
+      return;
+    }
+    smooth(st.fx.dry.gain, blend ? 1 - 0.5 * mix : 1);
+    smooth(st.fx.wet.gain, blend ? 0.5 * mix : mix);
   }
 
   function makeKnob(k, onChange) {
@@ -1069,6 +1184,12 @@
       e.preventDefault();
     });
     render();
+    // lets presets turn the knob from code
+    wrap.setValue = (v) => {
+      n = Math.max(0, Math.min(1, toNorm(v)));
+      render();
+      onChange(fromNorm(n));
+    };
     return wrap;
   }
 
@@ -1081,25 +1202,334 @@
     el.style.setProperty('--ink', def.ink);
     const knobs = document.createElement('div');
     knobs.className = 'pedal-knobs';
+    st.knobs = {};
     for (const k of def.knobs) {
-      knobs.appendChild(makeKnob(k, (v) => {
+      const kn = makeKnob(k, (v) => {
         st.p[k.id] = v;
         if (st.fx) { st.fx.set(st.p); applyMix(st); }
-      }));
+      });
+      st.knobs[k.id] = kn;
+      knobs.appendChild(kn);
     }
     el.appendChild(knobs);
     el.insertAdjacentHTML('beforeend',
       `<span class="led" aria-hidden="true"></span><div class="pedal-name">${def.name}</div>
        <button class="foot" aria-pressed="false" aria-label="${def.name} on/off"></button>`);
     const foot = el.querySelector('.foot');
-    foot.addEventListener('click', () => {
-      st.on = !st.on;
-      el.classList.toggle('on', st.on);
-      foot.setAttribute('aria-pressed', st.on);
+    st.setOn = (on) => {
+      st.on = on;
+      el.classList.toggle('on', on);
+      foot.setAttribute('aria-pressed', on);
       applyMix(st);
-    });
+    };
+    foot.addEventListener('click', () => st.setOn(!st.on));
     boardEl.appendChild(el);
   }
+
+  // ---- Wave maker ----
+  // One cycle of the wave is kept as N samples (for drawing) and as Fourier coefficients (for sound).
+  const N = 256, NB = 32; // samples per cycle, harmonic bars shown
+  const shape = new Float32Array(N);
+  const drawCv = $('waveDraw'), barsCv = $('harmBars');
+  const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  function normalizeCoeffs() {
+    let peak = 0;
+    for (let k = 1; k <= HARMS; k++) peak = Math.max(peak, Math.hypot(custom.real[k], custom.imag[k]));
+    if (peak < 1e-9) { custom.imag[1] = 1; peak = 1; }
+    for (let k = 1; k <= HARMS; k++) { custom.real[k] /= peak; custom.imag[k] /= peak; }
+  }
+  // coefficients -> samples
+  function synthShape() {
+    let peak = 1e-9;
+    for (let j = 0; j < N; j++) {
+      let v = 0;
+      for (let k = 1; k <= HARMS; k++) {
+        if (!custom.real[k] && !custom.imag[k]) continue;
+        const a = (2 * Math.PI * k * j) / N;
+        v += custom.real[k] * Math.cos(a) + custom.imag[k] * Math.sin(a);
+      }
+      shape[j] = v;
+      peak = Math.max(peak, Math.abs(v));
+    }
+    for (let j = 0; j < N; j++) shape[j] /= peak;
+  }
+  // samples -> coefficients (a plain DFT; 64 x 256 is cheap)
+  function analyzeShape() {
+    let mean = 0;
+    for (let j = 0; j < N; j++) mean += shape[j] / N;
+    for (let k = 1; k <= HARMS; k++) {
+      let re = 0, im = 0;
+      for (let j = 0; j < N; j++) {
+        const a = (2 * Math.PI * k * j) / N, v = shape[j] - mean;
+        re += v * Math.cos(a);
+        im += v * Math.sin(a);
+      }
+      custom.real[k] = (2 * re) / N;
+      custom.imag[k] = (2 * im) / N;
+    }
+    normalizeCoeffs();
+  }
+  function setCoeffs(fn) {
+    custom.real.fill(0);
+    custom.imag.fill(0);
+    for (let k = 1; k <= HARMS; k++) {
+      const [re, im] = fn(k);
+      custom.real[k] = re;
+      custom.imag[k] = im;
+    }
+    normalizeCoeffs();
+    synthShape();
+    drawWaveMaker();
+    customChanged();
+  }
+
+  function fitCanvas(cv) {
+    const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    const g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { g, w, h };
+  }
+  function drawWaveMaker() {
+    let { g, w, h } = fitCanvas(drawCv);
+    g.fillStyle = cssVar('--scope-bg');
+    g.fillRect(0, 0, w, h);
+    g.strokeStyle = cssVar('--scope-grid');
+    g.lineWidth = 1;
+    g.beginPath();
+    for (let i = 1; i < 4; i++) { g.moveTo((w * i) / 4, 0); g.lineTo((w * i) / 4, h); }
+    g.moveTo(0, h / 2); g.lineTo(w, h / 2);
+    g.stroke();
+    g.strokeStyle = cssVar('--scope-trace');
+    g.lineWidth = 2.5;
+    g.lineJoin = 'round';
+    g.beginPath();
+    for (let j = 0; j <= N; j++) {
+      const x = (j / N) * w, y = h / 2 - shape[j % N] * (h / 2) * 0.85;
+      j ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+    g.stroke();
+
+    ({ g, w, h } = fitCanvas(barsCv));
+    g.clearRect(0, 0, w, h);
+    const bw = w / NB;
+    g.font = '9px ui-monospace, monospace';
+    g.textAlign = 'center';
+    for (let k = 1; k <= NB; k++) {
+      const m = Math.min(1, Math.hypot(custom.real[k], custom.imag[k]));
+      const x = (k - 1) * bw;
+      g.fillStyle = cssVar('--roll-black');
+      g.fillRect(x + 1, 0, bw - 2, h - 12);
+      g.fillStyle = cssVar('--accent');
+      const bh = m * (h - 12);
+      g.fillRect(x + 1, h - 12 - bh, bw - 2, bh);
+      if (k === 1 || k % 4 === 0) { g.fillStyle = cssVar('--muted'); g.fillText(k, x + bw / 2, h - 2); }
+    }
+  }
+
+  // Draw the wave freehand.
+  let painting = null, analyzeQueued = false;
+  function paintAt(e) {
+    const r = drawCv.getBoundingClientRect();
+    const j = Math.max(0, Math.min(N - 1, Math.floor(((e.clientX - r.left) / r.width) * N)));
+    const v = Math.max(-1, Math.min(1, (r.height / 2 - (e.clientY - r.top)) / ((r.height / 2) * 0.85)));
+    if (painting.j == null) shape[j] = v;
+    else {
+      const [a, b] = painting.j < j ? [painting.j, j] : [j, painting.j];
+      for (let i = a; i <= b; i++) shape[i] = b === a ? v : painting.v + ((v - painting.v) * (i - painting.j)) / (j - painting.j);
+    }
+    painting.j = j;
+    painting.v = v;
+    drawWaveMaker();
+    if (!analyzeQueued) {
+      analyzeQueued = true;
+      requestAnimationFrame(() => { analyzeQueued = false; analyzeShape(); customChanged(); drawWaveMaker(); });
+    }
+  }
+  drawCv.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    drawCv.setPointerCapture(e.pointerId);
+    painting = { j: null, v: 0 };
+    if (wave !== 'custom') setWave('custom');
+    clearPresetHighlight();
+    paintAt(e);
+  });
+  drawCv.addEventListener('pointermove', (e) => painting && paintAt(e));
+  const endPaint = () => {
+    if (!painting) return;
+    painting = null;
+    analyzeShape();
+    synthShape(); // show what will actually sound (smoothed to 64 harmonics)
+    drawWaveMaker();
+    customChanged();
+  };
+  drawCv.addEventListener('pointerup', endPaint);
+  drawCv.addEventListener('pointercancel', endPaint);
+
+  // Drag the harmonic bars.
+  let barDrag = null;
+  function barAt(e) {
+    const r = barsCv.getBoundingClientRect();
+    const k = Math.max(1, Math.min(NB, Math.floor(((e.clientX - r.left) / r.width) * NB) + 1));
+    const m = Math.max(0, Math.min(1, (r.height - 12 - (e.clientY - r.top)) / (r.height - 12)));
+    const setMag = (kk, mm) => {
+      const cur = Math.hypot(custom.real[kk], custom.imag[kk]);
+      const ph = cur > 1e-6 ? Math.atan2(custom.imag[kk], custom.real[kk]) : Math.PI / 2; // keep the phase
+      custom.real[kk] = mm * Math.cos(ph);
+      custom.imag[kk] = mm * Math.sin(ph);
+    };
+    if (barDrag.k == null) setMag(k, m);
+    else {
+      const [a, b] = barDrag.k < k ? [barDrag.k, k] : [k, barDrag.k];
+      for (let i = a; i <= b; i++) setMag(i, b === a ? m : barDrag.m + ((m - barDrag.m) * (i - barDrag.k)) / (k - barDrag.k));
+    }
+    barDrag.k = k;
+    barDrag.m = m;
+    synthShape();
+    drawWaveMaker();
+    customChanged();
+  }
+  barsCv.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    barsCv.setPointerCapture(e.pointerId);
+    barDrag = { k: null, m: 0 };
+    if (wave !== 'custom') setWave('custom');
+    clearPresetHighlight();
+    barAt(e);
+  });
+  barsCv.addEventListener('pointermove', (e) => barDrag && barAt(e));
+  barsCv.addEventListener('pointerup', () => (barDrag = null));
+  barsCv.addEventListener('pointercancel', () => (barDrag = null));
+
+  const TEMPLATES = {
+    sine: (k) => [0, k === 1 ? 1 : 0],
+    saw: (k) => [0, ((2 / (Math.PI * k)) * (k % 2 ? 1 : -1))],
+    square: (k) => [0, k % 2 ? 4 / (Math.PI * k) : 0],
+    triangle: (k) => [0, k % 2 ? (8 / (Math.PI * Math.PI * k * k)) * ((k - 1) / 2 % 2 ? -1 : 1) : 0],
+    random: (k) => { const m = Math.random() * Math.pow(k, -0.8) * (k > 24 ? 0 : 1), ph = Math.random() * Math.PI * 2; return [m * Math.cos(ph), m * Math.sin(ph)]; },
+  };
+  document.querySelectorAll('[data-template]').forEach((b) => b.addEventListener('click', () => {
+    setCoeffs(TEMPLATES[b.dataset.template]);
+    setWave('custom');
+    clearPresetHighlight();
+  }));
+  $('smoothWave').addEventListener('click', () => {
+    setCoeffs((k) => { const f = 1 / (1 + (k / 8) ** 2); return [custom.real[k] * f, custom.imag[k] * f]; });
+    setWave('custom');
+  });
+  window.addEventListener('resize', drawWaveMaker);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', drawWaveMaker);
+  synthShape();
+  drawWaveMaker();
+
+  // ---- Instrument presets ----
+  // `harm` = harmonic amplitudes (1st, 2nd, 3rd...) for the Custom wave; or `wave` = a basic waveform.
+  // `fx` = pedals to switch on, with their knob settings (pedals left out are switched off).
+  const H = (fn, n = 32) => Array.from({ length: n }, (_, i) => fn(i + 1));
+  const PRESETS = [
+    { name: 'Piano', harm: H((n) => Math.pow(n, -1.7) * (n % 7 ? 1 : 0.3)),
+      fx: { env: { a: 0.003, d: 1.4, s: 0, r: 0.35 }, filter: { cutoff: 5000, q: 0.7 }, reverb: { decay: 1.8, tone: 6000, mix: 0.2 } } },
+    { name: 'E. piano', harm: H((n) => [1, 0.3, 0.12, 0.06][n - 1] || 0),
+      fx: { env: { a: 0.003, d: 2, s: 0.15, r: 0.45 }, chorus: { rate: 0.6, depth: 0.45, mix: 0.7 }, reverb: { decay: 1.5, tone: 5000, mix: 0.15 } } },
+    { name: 'Organ', harm: H((n) => ({ 1: 1, 2: 0.8, 3: 0.6, 4: 0.5, 6: 0.35, 8: 0.3, 10: 0.1, 12: 0.15, 16: 0.1 })[n] || 0),
+      fx: { env: { a: 0.005, d: 0.05, s: 1, r: 0.06 }, drive: { drive: 2.5, level: 0.7, mix: 0.4 }, chorus: { rate: 5.5, depth: 0.3, mix: 0.5 }, reverb: { decay: 2, tone: 5000, mix: 0.2 } } },
+    { name: 'Strings', harm: H((n) => 1 / n),
+      fx: { env: { a: 0.4, d: 0.3, s: 0.9, r: 0.7 }, filter: { cutoff: 3500, q: 0.7 }, chorus: { rate: 0.3, depth: 0.7, mix: 0.8 }, reverb: { decay: 3, tone: 6000, mix: 0.35 } } },
+    { name: 'Brass', harm: H((n) => (1 / n) * (n <= 6 ? 1 : 0.6)),
+      fx: { env: { a: 0.07, d: 0.2, s: 0.75, r: 0.15 }, filter: { cutoff: 2400, q: 2 }, reverb: { decay: 1.6, tone: 5000, mix: 0.2 } } },
+    { name: 'Flute', harm: H((n) => [1, 0.12, 0.06][n - 1] || 0.01 / n),
+      fx: { env: { a: 0.09, d: 0.1, s: 0.9, r: 0.2 }, reverb: { decay: 2.2, tone: 7000, mix: 0.3 } } },
+    { name: 'Clarinet', harm: H((n) => (n % 2 ? 1 / n : 0.02)),
+      fx: { env: { a: 0.04, d: 0.1, s: 0.9, r: 0.15 }, filter: { cutoff: 3000, q: 0.8 }, reverb: { decay: 1.8, tone: 5000, mix: 0.2 } } },
+    { name: 'Bass', harm: H((n) => Math.pow(n, -1.2)),
+      fx: { env: { a: 0.004, d: 0.5, s: 0.35, r: 0.1 }, drive: { drive: 4, level: 0.6, mix: 0.3 }, filter: { cutoff: 900, q: 3 } } },
+    { name: 'Pluck', harm: H((n) => Math.pow(n, -1.1)),
+      fx: { env: { a: 0.002, d: 0.45, s: 0, r: 0.3 }, filter: { cutoff: 3500, q: 1.5 }, delay: { time: 0.3, feedback: 0.35, mix: 0.3 }, reverb: { decay: 1.5, tone: 5000, mix: 0.2 } } },
+    { name: 'Bell', harm: H((n) => ({ 1: 1, 3: 0.5, 5: 0.25, 7: 0.4, 11: 0.3, 13: 0.2, 17: 0.1 })[n] || 0),
+      fx: { env: { a: 0.002, d: 2.5, s: 0, r: 1.5 }, delay: { time: 0.45, feedback: 0.25, mix: 0.2 }, reverb: { decay: 4, tone: 8000, mix: 0.4 } } },
+    { name: 'Lead', wave: 'square',
+      fx: { env: { a: 0.01, d: 0.2, s: 0.8, r: 0.15 }, drive: { drive: 8, level: 0.5, mix: 0.5 }, filter: { cutoff: 3000, q: 4 }, delay: { time: 0.35, feedback: 0.4, mix: 0.25 } } },
+    { name: 'Pad', harm: H((n) => 1 / n),
+      fx: { env: { a: 1.2, d: 1, s: 0.8, r: 2 }, filter: { cutoff: 1800, q: 1 }, chorus: { rate: 0.4, depth: 0.8, mix: 1 }, phaser: { rate: 0.1, depth: 0.6, feedback: 0.3, mix: 0.6 }, reverb: { decay: 6, tone: 5000, mix: 0.5 } } },
+    { name: 'Chiptune', harm: H((n) => Math.abs(Math.sin(Math.PI * n * 0.25)) / n), // 25% pulse
+      fx: { env: { a: 0.002, d: 0.05, s: 0.9, r: 0.03 } } },
+    { name: 'Plain sine', wave: 'sine', fx: { env: { a: 0.01, d: 0.3, s: 0.8, r: 0.2 } } },
+  ];
+
+  const STORE_KEY = 'turkey-synth.presets';
+  let userPresets = [];
+  try { userPresets = JSON.parse(localStorage.getItem(STORE_KEY) || '[]'); } catch { userPresets = []; }
+  const saveUserPresets = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(userPresets)); } catch { /* storage unavailable */ } };
+
+  function applyPreset(p, btn) {
+    if (p.coeffs) {
+      custom.real.set(p.coeffs.real);
+      custom.imag.set(p.coeffs.imag);
+      normalizeCoeffs();
+      synthShape();
+      drawWaveMaker();
+      customChanged();
+      setWave('custom');
+    } else if (p.harm) {
+      setCoeffs((k) => [0, p.harm[k - 1] || 0]);
+      setWave('custom');
+    } else setWave(p.wave || 'sine');
+    for (const def of PEDALS) {
+      const st = pedals[def.id], cfg = p.fx[def.id];
+      if (cfg) for (const k of def.knobs) st.knobs[k.id].setValue(cfg[k.id] ?? k.value);
+      st.setOn(!!cfg);
+    }
+    clearPresetHighlight();
+    if (btn) btn.setAttribute('aria-pressed', 'true');
+    // a short preview note
+    ensureAudio();
+    if (!running && !seqTimer) playNote(60, ctx.currentTime + 0.02, 0.5);
+  }
+  function clearPresetHighlight() {
+    document.querySelectorAll('#presets .preset').forEach((b) => b.setAttribute('aria-pressed', 'false'));
+  }
+  function snapshot(name) {
+    const fx = {};
+    for (const def of PEDALS) if (pedals[def.id].on) fx[def.id] = { ...pedals[def.id].p };
+    return { name, wave, coeffs: wave === 'custom' ? { real: [...custom.real], imag: [...custom.imag] } : null, fx };
+  }
+  function renderPresets() {
+    const box = $('presets');
+    box.innerHTML = '';
+    const add = (p, user, i) => {
+      const b = document.createElement('button');
+      b.className = 'preset' + (user ? ' user' : '');
+      b.textContent = p.name;
+      b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', () => applyPreset(p, b));
+      if (!user) return box.appendChild(b);
+      const wrap = document.createElement('span');
+      wrap.className = 'preset-user';
+      const del = document.createElement('button');
+      del.className = 'preset-del';
+      del.textContent = '×';
+      del.setAttribute('aria-label', `Delete preset ${p.name}`);
+      del.addEventListener('click', () => {
+        if (!confirm(`Delete the preset "${p.name}"?`)) return;
+        userPresets.splice(i, 1);
+        saveUserPresets();
+        renderPresets();
+      });
+      wrap.append(b, del);
+      box.appendChild(wrap);
+    };
+    PRESETS.forEach((p) => add(p, false));
+    userPresets.forEach((p, i) => add(p, true, i));
+  }
+  $('savePreset').addEventListener('click', () => {
+    const name = (prompt('Name this sound:', 'My sound') || '').trim().slice(0, 24);
+    if (!name) return;
+    userPresets.push(snapshot(name));
+    saveUserPresets();
+    renderPresets();
+  });
+  renderPresets();
 
   // ---- Sheet music import (recognizer lives in omr.js) ----
   const omr = { img: null, result: null };
