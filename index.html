@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Turkey Synth</title>
+<style>
+  :root {
+    --bg: #f4f1ec;
+    --panel: #ffffff;
+    --text: #1f1d1a;
+    --muted: #6b665e;
+    --accent: #c4511f;
+    --line: #ddd6cc;
+    --scope-bg: #1c1a17;
+    --scope-grid: #2e2b27;
+    --scope-trace: #ff8a4c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141311;
+      --panel: #1e1c19;
+      --text: #ece7df;
+      --muted: #9a948a;
+      --accent: #ff8a4c;
+      --line: #34302b;
+      --scope-bg: #0d0c0b;
+      --scope-grid: #24211e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  main { width: 100%; max-width: 640px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); font-size: .9rem; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  canvas {
+    width: 100%;
+    height: 180px;
+    display: block;
+    border-radius: 8px;
+    background: var(--scope-bg);
+    margin-bottom: 20px;
+  }
+  .waves { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 20px; }
+  .waves button {
+    font: inherit; font-size: .85rem;
+    padding: 10px 4px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .waves button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .control { margin-bottom: 16px; }
+  .control label { display: flex; justify-content: space-between; font-size: .85rem; margin-bottom: 6px; }
+  .control label span { color: var(--muted); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  #power {
+    width: 100%;
+    font: inherit; font-weight: 600;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+  }
+  .hint { margin-top: 12px; font-size: .8rem; color: var(--muted); text-align: center; }
+  kbd { font-family: ui-monospace, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Turkey Synth</h1>
+  <p class="sub">A simple waveform oscillator.</p>
+  <div class="panel">
+    <canvas id="scope"></canvas>
+
+    <div class="waves" role="group" aria-label="Waveform">
+      <button data-wave="sine" aria-pressed="true">Sine</button>
+      <button data-wave="square" aria-pressed="false">Square</button>
+      <button data-wave="sawtooth" aria-pressed="false">Saw</button>
+      <button data-wave="triangle" aria-pressed="false">Triangle</button>
+    </div>
+
+    <div class="control">
+      <label for="freq">Frequency <span id="freqVal"></span></label>
+      <input id="freq" type="range" min="0" max="1000" value="347">
+    </div>
+    <div class="control">
+      <label for="detune">Detune <span id="detuneVal"></span></label>
+      <input id="detune" type="range" min="-100" max="100" value="0">
+    </div>
+    <div class="control">
+      <label for="vol">Volume <span id="volVal"></span></label>
+      <input id="vol" type="range" min="0" max="100" value="30">
+    </div>
+
+    <button id="power">Start</button>
+    <p class="hint"><kbd>Space</kbd> start/stop · <kbd>1</kbd>–<kbd>4</kbd> waveform</p>
+  </div>
+</main>
+
+<script>
+  const MIN_F = 20, MAX_F = 20000;
+  const $ = (id) => document.getElementById(id);
+  const freqEl = $('freq'), detuneEl = $('detune'), volEl = $('vol'), powerEl = $('power');
+  const waveBtns = [...document.querySelectorAll('.waves button')];
+
+  let ctx, osc, gain, analyser, running = false, wave = 'sine';
+
+  // Slider position (0–1000) -> frequency on a log scale.
+  const sliderToFreq = (v) => MIN_F * Math.pow(MAX_F / MIN_F, v / 1000);
+  const freq = () => sliderToFreq(+freqEl.value);
+  const vol = () => Math.pow(+volEl.value / 100, 2); // perceptual-ish curve
+
+  function updateLabels() {
+    const f = freq();
+    $('freqVal').textContent = f >= 1000 ? (f / 1000).toFixed(2) + ' kHz' : f.toFixed(1) + ' Hz';
+    $('detuneVal').textContent = (+detuneEl.value > 0 ? '+' : '') + detuneEl.value + ' ct';
+    $('volVal').textContent = volEl.value + '%';
+  }
+
+  function initAudio() {
+    ctx = new AudioContext();
+    gain = ctx.createGain();
+    gain.gain.value = 0;
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    gain.connect(ctx.destination);
+  }
+
+  function start() {
+    if (!ctx) initAudio();
+    ctx.resume();
+    osc = ctx.createOscillator();
+    osc.type = wave;
+    osc.frequency.value = freq();
+    osc.detune.value = +detuneEl.value;
+    osc.connect(gain);
+    osc.connect(analyser); // scope taps pre-volume so the trace stays readable
+    osc.start();
+    const t = ctx.currentTime;
+    gain.gain.cancelScheduledValues(t);
+    gain.gain.setValueAtTime(gain.gain.value, t);
+    gain.gain.linearRampToValueAtTime(vol(), t + 0.02); // short fade to avoid clicks
+    running = true;
+    powerEl.textContent = 'Stop';
+  }
+
+  function stop() {
+    const t = ctx.currentTime;
+    gain.gain.cancelScheduledValues(t);
+    gain.gain.setValueAtTime(gain.gain.value, t);
+    gain.gain.linearRampToValueAtTime(0, t + 0.03);
+    osc.stop(t + 0.04);
+    osc = null;
+    running = false;
+    powerEl.textContent = 'Start';
+  }
+
+  const toggle = () => (running ? stop() : start());
+
+  function setWave(w) {
+    wave = w;
+    waveBtns.forEach((b) => b.setAttribute('aria-pressed', b.dataset.wave === w));
+    if (osc) osc.type = w;
+  }
+
+  powerEl.addEventListener('click', toggle);
+  waveBtns.forEach((b) => b.addEventListener('click', () => setWave(b.dataset.wave)));
+
+  freqEl.addEventListener('input', () => {
+    updateLabels();
+    if (osc) osc.frequency.setTargetAtTime(freq(), ctx.currentTime, 0.01);
+  });
+  detuneEl.addEventListener('input', () => {
+    updateLabels();
+    if (osc) osc.detune.setTargetAtTime(+detuneEl.value, ctx.currentTime, 0.01);
+  });
+  volEl.addEventListener('input', () => {
+    updateLabels();
+    if (running) gain.gain.setTargetAtTime(vol(), ctx.currentTime, 0.01);
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { e.preventDefault(); toggle(); }
+    const i = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code);
+    if (i >= 0) setWave(waveBtns[i].dataset.wave);
+  });
+
+  // Oscilloscope
+  const canvas = $('scope');
+  const g = canvas.getContext('2d');
+  let buf;
+
+  function draw() {
+    requestAnimationFrame(draw);
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+      canvas.width = w * dpr; canvas.height = h * dpr;
+    }
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const css = getComputedStyle(document.documentElement);
+    g.fillStyle = css.getPropertyValue('--scope-bg');
+    g.fillRect(0, 0, w, h);
+
+    // grid
+    g.strokeStyle = css.getPropertyValue('--scope-grid');
+    g.lineWidth = 1;
+    g.beginPath();
+    for (let x = 0; x <= w; x += w / 8) { g.moveTo(x, 0); g.lineTo(x, h); }
+    for (let y = 0; y <= h; y += h / 4) { g.moveTo(0, y); g.lineTo(w, y); }
+    g.stroke();
+
+    if (!analyser) return;
+    if (!buf) buf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(buf);
+
+    // Find a rising zero crossing so the trace stays stable.
+    let start = 0;
+    for (let i = 1; i < buf.length / 2; i++) {
+      if (buf[i - 1] < 0 && buf[i] >= 0) { start = i; break; }
+    }
+    const span = buf.length / 2;
+    g.strokeStyle = css.getPropertyValue('--scope-trace');
+    g.lineWidth = 2;
+    g.beginPath();
+    for (let i = 0; i < span; i++) {
+      const x = (i / span) * w;
+      const y = h / 2 - buf[start + i] * (h / 2) * 0.9;
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+    g.stroke();
+  }
+
+  updateLabels();
+  draw();
+</script>
+</body>
+</html>
