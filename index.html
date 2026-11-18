@@ -186,6 +186,112 @@
     background: rgba(255,255,255,.55);
   }
   .note.playing { filter: brightness(1.3); }
+
+  /* Roll scrollbar */
+  .roll-wrap { scrollbar-width: none; }
+  .roll-wrap::-webkit-scrollbar { display: none; }
+  .roll-scroll {
+    display: block;
+    width: 100%;
+    height: 16px;
+    margin: 8px 0 0;
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--roll-black);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .roll-scroll[hidden] { display: none; }
+  .roll-scroll::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: var(--thumb, 40px);
+    height: 14px;
+    border-radius: 7px;
+    background: var(--muted);
+    cursor: grab;
+  }
+  .roll-scroll::-moz-range-thumb {
+    width: var(--thumb, 40px);
+    height: 14px;
+    border: none;
+    border-radius: 7px;
+    background: var(--muted);
+    cursor: grab;
+  }
+  .roll-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* Pedalboard */
+  .flow { margin: -4px 0 14px; font-size: .8rem; color: var(--muted); }
+  .pedalboard {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  @media (max-width: 520px) { .pedalboard { grid-template-columns: repeat(2, 1fr); } }
+  .pedal {
+    background: var(--pedal);
+    color: var(--ink);
+    border-radius: 12px;
+    padding: 14px 10px 14px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.4), inset 0 -4px 0 rgba(0,0,0,.15), 0 2px 6px rgba(0,0,0,.18);
+  }
+  .pedal-knobs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 6px;
+    width: 100%;
+    flex: 1;
+    align-content: start;
+  }
+  .knob-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .knob-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+  .knob {
+    --angle: 0deg;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #4d4945, #1b1917 70%);
+    box-shadow: 0 2px 3px rgba(0,0,0,.35), inset 0 1px 1px rgba(255,255,255,.15);
+    position: relative;
+    transform: rotate(var(--angle));
+    cursor: ns-resize;
+    touch-action: none;
+  }
+  .knob::after {
+    content: "";
+    position: absolute;
+    left: 50%; top: 4px;
+    width: 3px; height: 12px;
+    margin-left: -1.5px;
+    border-radius: 2px;
+    background: #f4efe6;
+  }
+  .knob:focus { outline: none; }
+  .knob:focus-visible { box-shadow: 0 0 0 2px var(--pedal), 0 0 0 4px var(--ink); }
+  .knob-val { font-size: 10px; font-variant-numeric: tabular-nums; opacity: .8; white-space: nowrap; }
+  .led {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: #6b2219;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,.5);
+  }
+  .pedal.on .led { background: #ff3b2f; box-shadow: 0 0 8px 2px rgba(255,59,47,.65); }
+  .pedal-name { font-size: .9rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+  .foot {
+    width: 46px; height: 46px;
+    border-radius: 50%;
+    border: 3px solid #8d8a85;
+    background: radial-gradient(circle at 40% 35%, #f4f2ee, #a9a59f 70%);
+    box-shadow: 0 3px 0 #5f5c58, 0 4px 6px rgba(0,0,0,.3);
+    cursor: pointer;
+  }
+  .foot:active { transform: translateY(2px); box-shadow: 0 1px 0 #5f5c58, 0 2px 3px rgba(0,0,0,.3); }
+  .foot:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 </style>
 </head>
 <body>
@@ -232,7 +338,14 @@
       <label class="bpm" for="bpm">Tempo <input id="bpm" type="range" min="60" max="200" value="120"><span id="bpmVal"></span></label>
     </div>
     <div class="roll-wrap" id="rollWrap"><div class="roll" id="roll"></div></div>
+    <input type="range" id="rollScroll" class="roll-scroll" min="0" max="1000" value="0" aria-label="Scroll piano roll" hidden>
     <p class="hint">Click a cell and drag right to draw a note · drag a note to change its length · click a note to delete it · click a key to hear it</p>
+  </div>
+
+  <div class="panel">
+    <h2>Pedalboard</h2>
+    <p class="flow">Envelope shapes every note, then the signal runs Chorus → Flanger → Phaser → Delay → Reverb. Drag a knob up or down; double-click to reset.</p>
+    <div class="pedalboard" id="pedalboard"></div>
   </div>
 </main>
 
@@ -242,7 +355,7 @@
   const freqEl = $('freq'), detuneEl = $('detune'), volEl = $('vol'), powerEl = $('power');
   const waveBtns = [...document.querySelectorAll('.waves button')];
 
-  let ctx, osc, gain, analyser, noteBus, noteVol, running = false, wave = 'sine';
+  let ctx, osc, drone, analyser, noteBus, preFx, master, running = false, wave = 'sine';
 
   const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
   const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
@@ -266,50 +379,70 @@
     $('volVal').textContent = volEl.value + '%';
   }
 
+  // Signal flow: drone + piano-roll voices -> preFx -> pedal chain -> master (volume) -> speakers.
+  // The scope taps the chain output before the volume control so the trace stays readable.
+  const DRONE_PEAK = 0.8;
   function initAudio() {
     ctx = new AudioContext();
-    gain = ctx.createGain();
-    gain.gain.value = 0;
     analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
-    gain.connect(ctx.destination);
-    // Piano-roll voices sum into noteBus (feeds the scope), then noteVol sets loudness.
+    preFx = ctx.createGain();
     noteBus = ctx.createGain();
-    noteVol = ctx.createGain();
-    noteVol.gain.value = vol() * 0.5;
-    const scopeTrim = ctx.createGain(); // headroom so chords fit on the scope
-    scopeTrim.gain.value = 0.4;
-    noteBus.connect(scopeTrim);
-    scopeTrim.connect(analyser);
-    noteBus.connect(noteVol);
-    noteVol.connect(ctx.destination);
+    noteBus.gain.value = 0.5;
+    noteBus.connect(preFx);
+    master = ctx.createGain();
+    master.gain.value = vol();
+    const chainOut = buildFxChain(preFx);
+    chainOut.connect(master);
+    chainOut.connect(analyser);
+    master.connect(ctx.destination);
+  }
+
+  // ---- Envelope (ADSR) ----
+  const DEFAULT_ENV = { a: 0.005, d: 0.24, s: 0.7, r: 0.12 }; // used when the Envelope pedal is off
+  const envParams = () => (pedals.env.on ? { ...pedals.env.p } : DEFAULT_ENV);
+  // Level of the attack/decay/sustain curve t seconds after note-on (matches what the scheduler draws).
+  function envLevel(t, e) {
+    if (t < e.a) return t / e.a;
+    return e.s + (1 - e.s) * Math.exp(-(t - e.a) / (e.d / 3));
+  }
+  function noteOn(param, when, e, peak) {
+    param.setValueAtTime(0, when);
+    param.linearRampToValueAtTime(peak, when + e.a);
+    param.setTargetAtTime(e.s * peak, when + e.a, e.d / 3);
+  }
+  // Starts the release at `off`; returns the time the voice is effectively silent.
+  function noteOff(param, when, off, e, peak) {
+    const level = envLevel(off - when, e) * peak;
+    param.cancelScheduledValues(off);
+    if (off - when < e.a) param.linearRampToValueAtTime(level, off); // released mid-attack
+    else param.setValueAtTime(level, off);
+    param.setTargetAtTime(0, off, e.r / 4);
+    return off + e.r * 1.5 + 0.05;
   }
 
   function start() {
-    if (!ctx) initAudio();
-    ctx.resume();
+    ensureAudio();
+    const t = ctx.currentTime, e = envParams();
     osc = ctx.createOscillator();
     osc.type = wave;
     osc.frequency.value = freq();
     osc.detune.value = +detuneEl.value;
-    osc.connect(gain);
-    osc.connect(analyser); // scope taps pre-volume so the trace stays readable
-    osc.start();
-    const t = ctx.currentTime;
-    gain.gain.cancelScheduledValues(t);
-    gain.gain.setValueAtTime(gain.gain.value, t);
-    gain.gain.linearRampToValueAtTime(vol(), t + 0.02); // short fade to avoid clicks
+    const env = ctx.createGain();
+    env.gain.value = 0;
+    osc.connect(env);
+    env.connect(preFx);
+    noteOn(env.gain, t, e, DRONE_PEAK);
+    osc.start(t);
+    drone = { osc, env, t0: t, e };
     running = true;
     powerEl.textContent = 'Stop';
   }
 
   function stop() {
-    const t = ctx.currentTime;
-    gain.gain.cancelScheduledValues(t);
-    gain.gain.setValueAtTime(gain.gain.value, t);
-    gain.gain.linearRampToValueAtTime(0, t + 0.03);
-    osc.stop(t + 0.04);
-    osc = null;
+    const { osc: o, env, t0, e } = drone;
+    o.stop(noteOff(env.gain, t0, ctx.currentTime + 0.005, e, DRONE_PEAK));
+    osc = drone = null;
     running = false;
     powerEl.textContent = 'Start';
   }
@@ -335,8 +468,13 @@
   });
   volEl.addEventListener('input', () => {
     updateLabels();
-    if (running) gain.gain.setTargetAtTime(vol(), ctx.currentTime, 0.01);
-    if (noteVol) noteVol.gain.setTargetAtTime(vol() * 0.5, ctx.currentTime, 0.01);
+    if (master) master.gain.setTargetAtTime(vol(), ctx.currentTime, 0.01);
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { e.preventDefault(); toggle(); } // also stops a focused button from clicking
+    const i = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code);
+    if (i >= 0) setWave(waveBtns[i].dataset.wave);
   });
 
   // ---- Piano roll ----
@@ -457,6 +595,8 @@
     document.querySelectorAll('#bars button').forEach((btn) => btn.setAttribute('aria-pressed', +btn.dataset.bars === b));
     headQueue = [];
     buildGrid();
+    wrapEl.scrollLeft = 0;
+    syncScroll();
   }
   document.querySelectorAll('#bars button').forEach((btn) => btn.addEventListener('click', () => setBars(+btn.dataset.bars)));
 
@@ -471,14 +611,13 @@
     o.type = wave;
     o.frequency.value = midiToFreq(m);
     o.detune.value = +detuneEl.value;
-    env.gain.setValueAtTime(0, when);
-    env.gain.linearRampToValueAtTime(1, when + 0.005);
-    env.gain.setTargetAtTime(0.7, when + 0.005, 0.08);
-    env.gain.setTargetAtTime(0, when + dur, 0.03);
+    env.gain.value = 0;
     o.connect(env);
     env.connect(noteBus);
+    const e = envParams();
+    noteOn(env.gain, when, e, 1);
     o.start(when);
-    o.stop(when + dur + 0.2);
+    o.stop(noteOff(env.gain, when, when + dur, e, 1));
   }
 
   const flashTimers = new Map();
@@ -556,6 +695,282 @@
   // A short starter phrase with mixed note lengths so Play does something right away.
   [[48, 0, 8], [55, 8, 8], [60, 0, 2], [64, 2, 2], [67, 4, 4], [71, 8, 1], [69, 9, 1], [67, 10, 2], [64, 12, 4]]
     .forEach(([m, s, len]) => addNote(m, s, len));
+
+  // ---- Roll scrollbar (native ones are hidden or overlay-only on phones) ----
+  const scrollEl = $('rollScroll');
+  function syncScroll() {
+    const max = wrapEl.scrollWidth - wrapEl.clientWidth;
+    scrollEl.hidden = max <= 1;
+    if (max <= 1) return;
+    const thumb = Math.max(32, (scrollEl.clientWidth * wrapEl.clientWidth) / wrapEl.scrollWidth);
+    scrollEl.style.setProperty('--thumb', thumb + 'px');
+    scrollEl.value = Math.round((wrapEl.scrollLeft / max) * 1000);
+  }
+  scrollEl.addEventListener('input', () => {
+    wrapEl.scrollLeft = (scrollEl.value / 1000) * (wrapEl.scrollWidth - wrapEl.clientWidth);
+  });
+  wrapEl.addEventListener('scroll', syncScroll);
+  window.addEventListener('resize', syncScroll);
+  syncScroll();
+
+  // ---- Pedalboard ----
+  const sec = (v) => (v < 1 ? Math.round(v * 1000) + ' ms' : v.toFixed(2) + ' s');
+  const pct = (v) => Math.round(v * 100) + '%';
+  const hz = (v) => (v < 10 ? v.toFixed(2) : Math.round(v)) + ' Hz';
+  const khz = (v) => (v >= 1000 ? (v / 1000).toFixed(1) + ' kHz' : Math.round(v) + ' Hz');
+  const smooth = (param, v, tc = 0.02) => param.setTargetAtTime(v, ctx.currentTime, tc);
+
+  function lfo(ctx) {
+    const o = ctx.createOscillator(), depth = ctx.createGain();
+    o.connect(depth);
+    o.start();
+    return { o, depth };
+  }
+
+  function makeIR(ctx, seconds) {
+    const len = Math.ceil(ctx.sampleRate * seconds);
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const data = buf.getChannelData(ch);
+      for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * Math.exp((-6.9 * i) / len); // -60 dB at the end
+    }
+    return buf;
+  }
+
+  // Chain order is the order of this list. `blend` effects mix 50/50 with the dry signal at full Mix;
+  // the others add their wet signal on top of an untouched dry signal.
+  const PEDALS = [
+    {
+      id: 'env', name: 'Envelope', color: '#e9dcc0', ink: '#3a2e1a',
+      knobs: [
+        { id: 'a', label: 'Attack', min: 0.001, max: 2, value: 0.01, log: true, fmt: sec },
+        { id: 'd', label: 'Decay', min: 0.01, max: 2, value: 0.3, log: true, fmt: sec },
+        { id: 's', label: 'Sustain', min: 0, max: 1, value: 0.6, fmt: pct },
+        { id: 'r', label: 'Release', min: 0.01, max: 3, value: 0.4, log: true, fmt: sec },
+      ],
+    },
+    {
+      id: 'chorus', name: 'Chorus', color: '#7cc4b8', ink: '#0f2e2a', blend: true,
+      knobs: [
+        { id: 'rate', label: 'Rate', min: 0.1, max: 5, value: 0.8, log: true, fmt: hz },
+        { id: 'depth', label: 'Depth', min: 0, max: 1, value: 0.5, fmt: pct },
+        { id: 'mix', label: 'Mix', min: 0, max: 1, value: 0.8, fmt: pct },
+      ],
+      build(ctx) {
+        const d = ctx.createDelay(0.1);
+        d.delayTime.value = 0.02;
+        const l = lfo(ctx);
+        l.depth.connect(d.delayTime);
+        return { input: d, output: d, set(p) { smooth(l.o.frequency, p.rate); smooth(l.depth.gain, p.depth * 0.008); } };
+      },
+    },
+    {
+      id: 'flanger', name: 'Flanger', color: '#b1a2dc', ink: '#221a3d', blend: true,
+      knobs: [
+        { id: 'rate', label: 'Rate', min: 0.05, max: 5, value: 0.25, log: true, fmt: hz },
+        { id: 'depth', label: 'Depth', min: 0, max: 1, value: 0.7, fmt: pct },
+        { id: 'feedback', label: 'Regen', min: 0, max: 0.95, value: 0.6, fmt: pct },
+        { id: 'mix', label: 'Mix', min: 0, max: 1, value: 1, fmt: pct },
+      ],
+      build(ctx) {
+        const d = ctx.createDelay(0.05), fb = ctx.createGain();
+        d.delayTime.value = 0.003;
+        d.connect(fb);
+        fb.connect(d);
+        const l = lfo(ctx);
+        l.depth.connect(d.delayTime);
+        return {
+          input: d, output: d,
+          set(p) { smooth(l.o.frequency, p.rate); smooth(l.depth.gain, p.depth * 0.0025); smooth(fb.gain, p.feedback); },
+        };
+      },
+    },
+    {
+      id: 'phaser', name: 'Phaser', color: '#f0a45c', ink: '#3d2008', blend: true,
+      knobs: [
+        { id: 'rate', label: 'Rate', min: 0.05, max: 8, value: 0.5, log: true, fmt: hz },
+        { id: 'depth', label: 'Depth', min: 0, max: 1, value: 0.7, fmt: pct },
+        { id: 'feedback', label: 'Regen', min: 0, max: 0.85, value: 0.4, fmt: pct },
+        { id: 'mix', label: 'Mix', min: 0, max: 1, value: 1, fmt: pct },
+      ],
+      build(ctx) {
+        const sum = ctx.createGain(), fb = ctx.createGain(), loop = ctx.createDelay(0.01);
+        const l = lfo(ctx);
+        let last = sum;
+        for (let i = 0; i < 4; i++) {
+          const f = ctx.createBiquadFilter();
+          f.type = 'allpass';
+          f.frequency.value = 800;
+          f.Q.value = 0.6;
+          l.depth.connect(f.detune); // sweep in cents, so it moves evenly through the octaves
+          last.connect(f);
+          last = f;
+        }
+        last.connect(fb);
+        fb.connect(loop); // feedback loops need a delay node; it's held to the minimum
+        loop.connect(sum);
+        return {
+          input: sum, output: last,
+          set(p) { smooth(l.o.frequency, p.rate); smooth(l.depth.gain, p.depth * 2400); smooth(fb.gain, p.feedback); },
+        };
+      },
+    },
+    {
+      id: 'delay', name: 'Delay', color: '#9cc46f', ink: '#1d2e0c',
+      knobs: [
+        { id: 'time', label: 'Time', min: 0.05, max: 1.5, value: 0.35, log: true, fmt: sec },
+        { id: 'feedback', label: 'Repeats', min: 0, max: 0.9, value: 0.4, fmt: pct },
+        { id: 'mix', label: 'Mix', min: 0, max: 1, value: 0.4, fmt: pct },
+      ],
+      build(ctx) {
+        const d = ctx.createDelay(2), fb = ctx.createGain(), tone = ctx.createBiquadFilter();
+        tone.type = 'lowpass';
+        tone.frequency.value = 3500; // each repeat gets a little darker
+        d.connect(tone);
+        tone.connect(fb);
+        fb.connect(d);
+        return { input: d, output: d, set(p) { smooth(d.delayTime, p.time, 0.05); smooth(fb.gain, p.feedback); } };
+      },
+    },
+    {
+      id: 'reverb', name: 'Reverb', color: '#86a9dd', ink: '#0f2140',
+      knobs: [
+        { id: 'decay', label: 'Decay', min: 0.3, max: 8, value: 2.5, log: true, fmt: sec },
+        { id: 'tone', label: 'Tone', min: 500, max: 12000, value: 5000, log: true, fmt: khz },
+        { id: 'mix', label: 'Mix', min: 0, max: 1, value: 0.35, fmt: pct },
+      ],
+      build(ctx) {
+        const conv = ctx.createConvolver(), tone = ctx.createBiquadFilter();
+        tone.type = 'lowpass';
+        conv.connect(tone);
+        let decay = 0, timer;
+        return {
+          input: conv, output: tone,
+          set(p) {
+            smooth(tone.frequency, p.tone);
+            if (p.decay === decay) return;
+            decay = p.decay;
+            clearTimeout(timer); // rebuilding the impulse is costly, so wait until the knob settles
+            if (!conv.buffer) conv.buffer = makeIR(ctx, decay);
+            else timer = setTimeout(() => (conv.buffer = makeIR(ctx, decay)), 150);
+          },
+        };
+      },
+    },
+  ];
+
+  const pedals = {}; // id -> { def, on, p, fx }
+  for (const def of PEDALS) {
+    const p = {};
+    def.knobs.forEach((k) => (p[k.id] = k.value));
+    pedals[def.id] = { def, on: false, p, fx: null };
+  }
+
+  function buildFxChain(input) {
+    let node = input;
+    for (const def of PEDALS) {
+      if (!def.build) continue;
+      const st = pedals[def.id];
+      const inner = def.build(ctx);
+      const fx = { input: ctx.createGain(), output: ctx.createGain(), dry: ctx.createGain(), wet: ctx.createGain(), set: inner.set };
+      fx.input.connect(fx.dry);
+      fx.dry.connect(fx.output);
+      fx.input.connect(inner.input);
+      inner.output.connect(fx.wet);
+      fx.wet.connect(fx.output);
+      fx.wet.gain.value = 0;
+      node.connect(fx.input);
+      node = fx.output;
+      st.fx = fx;
+      fx.set(st.p);
+      applyMix(st);
+    }
+    return node;
+  }
+
+  function applyMix(st) {
+    if (!st.fx) return;
+    const mix = st.on ? st.p.mix : 0;
+    smooth(st.fx.dry.gain, st.def.blend ? 1 - 0.5 * mix : 1);
+    smooth(st.fx.wet.gain, st.def.blend ? 0.5 * mix : mix);
+  }
+
+  function makeKnob(k, onChange) {
+    const wrap = document.createElement('div');
+    wrap.className = 'knob-wrap';
+    wrap.innerHTML = `<div class="knob-label">${k.label}</div><div class="knob" tabindex="0" role="slider"
+      aria-label="${k.label}" aria-valuemin="0" aria-valuemax="100"></div><div class="knob-val"></div>`;
+    const knob = wrap.querySelector('.knob'), val = wrap.querySelector('.knob-val');
+    const toNorm = (v) => (k.log ? Math.log(v / k.min) / Math.log(k.max / k.min) : (v - k.min) / (k.max - k.min));
+    const fromNorm = (n) => (k.log ? k.min * Math.pow(k.max / k.min, n) : k.min + n * (k.max - k.min));
+    let n = toNorm(k.value);
+    function render() {
+      const text = k.fmt(fromNorm(n));
+      knob.style.setProperty('--angle', -135 + 270 * n + 'deg');
+      val.textContent = text;
+      knob.setAttribute('aria-valuenow', Math.round(n * 100));
+      knob.setAttribute('aria-valuetext', text);
+    }
+    function set(next) {
+      n = Math.max(0, Math.min(1, next));
+      render();
+      onChange(fromNorm(n));
+    }
+    let dragFrom = null;
+    knob.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      knob.focus();
+      knob.setPointerCapture(e.pointerId);
+      dragFrom = { y: e.clientY, n };
+    });
+    knob.addEventListener('pointermove', (e) => {
+      if (dragFrom) set(dragFrom.n + (dragFrom.y - e.clientY) / 150);
+    });
+    knob.addEventListener('pointerup', () => (dragFrom = null));
+    knob.addEventListener('pointercancel', () => (dragFrom = null));
+    knob.addEventListener('wheel', (e) => { e.preventDefault(); set(n - Math.sign(e.deltaY) * 0.03); }, { passive: false });
+    knob.addEventListener('dblclick', () => set(toNorm(k.value)));
+    knob.addEventListener('keydown', (e) => {
+      const step = e.shiftKey ? 0.005 : 0.02;
+      const moves = { ArrowUp: step, ArrowRight: step, ArrowDown: -step, ArrowLeft: -step, PageUp: 0.1, PageDown: -0.1 };
+      if (e.key in moves) set(n + moves[e.key]);
+      else if (e.key === 'Home') set(0);
+      else if (e.key === 'End') set(1);
+      else return;
+      e.preventDefault();
+    });
+    render();
+    return wrap;
+  }
+
+  const boardEl = $('pedalboard');
+  for (const def of PEDALS) {
+    const st = pedals[def.id];
+    const el = document.createElement('div');
+    el.className = 'pedal';
+    el.style.setProperty('--pedal', def.color);
+    el.style.setProperty('--ink', def.ink);
+    const knobs = document.createElement('div');
+    knobs.className = 'pedal-knobs';
+    for (const k of def.knobs) {
+      knobs.appendChild(makeKnob(k, (v) => {
+        st.p[k.id] = v;
+        if (st.fx) { st.fx.set(st.p); applyMix(st); }
+      }));
+    }
+    el.appendChild(knobs);
+    el.insertAdjacentHTML('beforeend',
+      `<span class="led" aria-hidden="true"></span><div class="pedal-name">${def.name}</div>
+       <button class="foot" aria-pressed="false" aria-label="${def.name} on/off"></button>`);
+    const foot = el.querySelector('.foot');
+    foot.addEventListener('click', () => {
+      st.on = !st.on;
+      el.classList.toggle('on', st.on);
+      foot.setAttribute('aria-pressed', st.on);
+      applyMix(st);
+    });
+    boardEl.appendChild(el);
+  }
 
   // Oscilloscope
   const canvas = $('scope');
