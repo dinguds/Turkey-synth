@@ -605,15 +605,19 @@
     if (wave === 'custom') o.setPeriodicWave(customWave());
     else o.type = wave;
   }
+  // Every oscillator that is sounding (or scheduled to start soon): the drone plus piano-roll notes.
+  // Waveform and detune changes are applied to all of them, so you can change the sound mid-note.
+  const voices = new Set();
+  const liveOscs = () => (osc ? [osc, ...voices] : [...voices]);
   function customChanged() {
     custom.wave = null;
-    if (osc && wave === 'custom') applyWave(osc);
+    if (wave === 'custom') liveOscs().forEach(applyWave);
   }
 
   function setWave(w) {
     wave = w;
     waveBtns.forEach((b) => b.setAttribute('aria-pressed', b.dataset.wave === w));
-    if (osc) applyWave(osc);
+    liveOscs().forEach(applyWave);
   }
 
   powerEl.addEventListener('click', toggle);
@@ -625,7 +629,7 @@
   });
   detuneEl.addEventListener('input', () => {
     updateLabels();
-    if (osc) osc.detune.setTargetAtTime(+detuneEl.value, ctx.currentTime, 0.01);
+    liveOscs().forEach((o) => o.detune.setTargetAtTime(+detuneEl.value, ctx.currentTime, 0.01));
   });
   volEl.addEventListener('input', () => {
     updateLabels();
@@ -811,6 +815,9 @@
     noteOn(env.gain, when, e, 1);
     o.start(when);
     o.stop(noteOff(env.gain, when, when + dur, e, 1));
+    voices.add(o);
+    o.env = env;
+    o.onended = () => voices.delete(o);
   }
 
   const flashTimers = new Map();
@@ -868,6 +875,13 @@
       clearInterval(seqTimer);
       seqTimer = null;
       headQueue = [];
+      // fade out notes that are still sounding or already scheduled
+      const t = ctx.currentTime;
+      for (const o of voices) {
+        o.env.gain.cancelScheduledValues(t);
+        o.env.gain.setTargetAtTime(0, t, 0.03);
+        try { o.stop(t + 0.2); } catch { /* already stopped */ }
+      }
       setHead(-1);
       playEl.textContent = 'Play';
       return;
