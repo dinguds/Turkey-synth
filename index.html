@@ -121,10 +121,15 @@
   .transport .bpm input { flex: 1; }
   .transport .bpm span { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 56px; text-align: right; }
 
-  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-  .transport .seg button { border: none; border-radius: 0; padding: 8px 10px; font-weight: 500; }
-  .transport .seg button + button { border-left: 1px solid var(--line); }
-  .transport .seg button[aria-pressed="true"] { color: var(--accent); font-weight: 700; }
+  .bars-pick { display: inline-flex; align-items: center; gap: 6px; font-size: .85rem; }
+  select {
+    font: inherit; font-size: .85rem;
+    padding: 7px 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+  }
 
   .roll-wrap {
     border: 1px solid var(--line);
@@ -186,6 +191,16 @@
     background: rgba(255,255,255,.55);
   }
   .note.playing { filter: brightness(1.3); }
+  .note.legato { margin-right: -1px; border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  .note.legato::before { /* slur mark */
+    content: "";
+    position: absolute;
+    left: 30%; right: -40%; top: -5px;
+    height: 6px;
+    border-top: 1.5px solid var(--accent);
+    border-radius: 50% 50% 0 0;
+    pointer-events: none;
+  }
 
   /* Roll scrollbar */
   .roll-wrap { scrollbar-width: none; }
@@ -292,6 +307,47 @@
   }
   .foot:active { transform: translateY(2px); box-shadow: 0 1px 0 #5f5c58, 0 2px 3px rgba(0,0,0,.3); }
   .foot:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+
+  /* Sheet music import */
+  .drop {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    padding: 14px;
+    border: 1.5px dashed var(--line);
+    border-radius: 10px;
+    margin-bottom: 12px;
+    font-size: .85rem;
+    color: var(--muted);
+  }
+  .drop.over { border-color: var(--accent); background: var(--roll-head); }
+  .btn {
+    font: inherit; font-size: .85rem; font-weight: 600;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .omr-opts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+  .omr-opts label { display: flex; flex-direction: column; gap: 4px; font-size: .75rem; color: var(--muted); }
+  @media (max-width: 520px) { .omr-opts { grid-template-columns: repeat(2, 1fr); } }
+  .omr-status { font-size: .85rem; margin: 0 0 10px; min-height: 1.2em; }
+  .omr-status .warn { color: var(--accent); }
+  .omr-view {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: auto;
+    max-height: 520px;
+    background: #fff;
+    margin-bottom: 12px;
+  }
+  .omr-view canvas { display: block; width: 100%; cursor: zoom-in; }
+  .omr-view.zoomed canvas { width: auto; max-width: none; cursor: zoom-out; }
+  .omr-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-size: .85rem; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: .75rem; color: var(--muted); margin: -4px 0 10px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 </style>
 </head>
 <body>
@@ -330,16 +386,56 @@
     <div class="transport">
       <button id="play">Play</button>
       <button id="clear">Clear</button>
-      <div class="seg" id="bars" role="group" aria-label="Loop length">
-        <button data-bars="1" aria-pressed="true">1 bar</button>
-        <button data-bars="2" aria-pressed="false">2</button>
-        <button data-bars="4" aria-pressed="false">4</button>
-      </div>
+      <label class="bars-pick">Bars
+        <select id="bars" aria-label="Loop length in bars">
+          <option>1</option><option>2</option><option>4</option><option>8</option><option>16</option><option>32</option>
+        </select>
+      </label>
       <label class="bpm" for="bpm">Tempo <input id="bpm" type="range" min="60" max="200" value="120"><span id="bpmVal"></span></label>
     </div>
     <div class="roll-wrap" id="rollWrap"><div class="roll" id="roll"></div></div>
     <input type="range" id="rollScroll" class="roll-scroll" min="0" max="1000" value="0" aria-label="Scroll piano roll" hidden>
     <p class="hint">Click a cell and drag right to draw a note · drag a note to change its length · click a note to delete it · click a key to hear it</p>
+  </div>
+
+  <div class="panel" id="importPanel">
+    <h2>Import sheet music</h2>
+    <p class="flow">Upload a photo or scan of printed sheet music and it's read into the piano roll. It understands treble and bass clefs, key signatures, sharps, flats and naturals, slurs and ties, rests, dots and beams. It's rough: clean, straight, well-lit printed music works best.</p>
+    <div class="drop" id="drop">
+      <input type="file" id="sheetFile" accept="image/*" hidden>
+      <button class="btn primary" id="pickSheet">Choose image</button>
+      <button class="btn" id="sampleSheet">Try a sample</button>
+      <span>or drop or paste an image here</span>
+    </div>
+    <div class="omr-opts">
+      <label>Clef
+        <select id="optClef"><option value="auto">Auto</option><option value="treble">Treble</option><option value="bass">Bass</option></select>
+      </label>
+      <label>Key
+        <select id="optKey"></select>
+      </label>
+      <label>Time
+        <select id="optTime">
+          <option value="auto">Auto</option><option value="16">4/4</option><option value="12">3/4 or 6/8</option>
+          <option value="8">2/4</option><option value="24">6/4 or 12/8</option>
+        </select>
+      </label>
+      <label>Staves
+        <select id="optStaves"><option value="auto">Auto</option><option value="one">One line of music</option><option value="pairs">Piano (pairs)</option></select>
+      </label>
+    </div>
+    <p class="omr-status" id="omrStatus" role="status"></p>
+    <div class="legend" id="omrLegend" hidden>
+      <span><i style="background:#d9480f"></i>note</span><span><i style="background:#2b8a3e"></i>accidental</span>
+      <span><i style="background:#e8890c"></i>key signature</span><span><i style="background:#1c7ed6"></i>slur</span>
+      <span><i style="background:#9c36b5"></i>tie</span><span><i style="background:#868e96"></i>rest</span><span><i style="background:#e03131"></i>barline</span>
+    </div>
+    <div class="omr-view" id="omrView" hidden><canvas id="omrCanvas" title="Click to zoom"></canvas></div>
+    <div class="omr-actions" id="omrActions" hidden>
+      <button class="btn primary" id="loadSheet">Load into piano roll</button>
+      <label><input type="checkbox" id="showMarks" checked> Show what was recognized</label>
+      <span style="color:var(--muted)">Tap the image to zoom</span>
+    </div>
   </div>
 
   <div class="panel">
@@ -349,6 +445,7 @@
   </div>
 </main>
 
+<script src="omr.js"></script>
 <script>
   const MIN_F = 20, MAX_F = 20000;
   const $ = (id) => document.getElementById(id);
@@ -478,16 +575,22 @@
   });
 
   // ---- Piano roll ----
-  // Notes are {m, start, len} in 16th-note steps; the loop is 1, 2 or 4 bars long.
-  const LOW = 48, HIGH = 71, STEPS_PER_BAR = 16, KEY_W = 52; // C3–B4
-  const rows = [];
-  for (let m = HIGH; m >= LOW; m--) rows.push(m);
-  const rowOf = {};
-  rows.forEach((m, r) => (rowOf[m] = r));
+  // Notes are {m, start, len, legato} in 16th-note steps. The pitch range, bar length and number of bars
+  // can change (an imported score sets all three).
+  const KEY_W = 52, MAX_BARS = 32;
+  let stepsPerBar = 16, bars = 1;
+  let rows = [], rowOf = {};
+  function setRange(low, high) {
+    rows = [];
+    for (let m = high; m >= low; m--) rows.push(m);
+    rowOf = {};
+    rows.forEach((m, r) => (rowOf[m] = r));
+  }
+  setRange(48, 71); // C3–B4
   const isBlack = (m) => [1, 3, 6, 8, 10].includes(m % 12);
   const rollEl = $('roll'), wrapEl = $('rollWrap');
   const keyEls = {};
-  let steps = STEPS_PER_BAR, notes = [], cellCols = [], headStep = -1;
+  let steps = stepsPerBar, notes = [], cellCols = [], headStep = -1;
 
   function buildGrid() {
     rollEl.innerHTML = '';
@@ -505,7 +608,7 @@
       for (let s = 0; s < steps; s++) {
         const c = document.createElement('div');
         c.className = 'cell' + (isBlack(m) ? ' black' : '') + (m % 12 === 0 ? ' c' : '') +
-          (s % STEPS_PER_BAR === 0 && s ? ' bar' : s % 4 === 0 ? ' beat' : '');
+          (s % stepsPerBar === 0 && s ? ' bar' : s % 4 === 0 ? ' beat' : '');
         c.dataset.m = m;
         c.dataset.s = s;
         c.style.gridArea = `${r + 1} / ${s + 2}`;
@@ -523,13 +626,14 @@
       n.el.className = 'note';
       n.el._note = n;
     }
+    n.el.classList.toggle('legato', !!n.legato);
     n.el.style.gridArea = `${rowOf[n.m] + 1} / ${n.start + 2} / auto / span ${n.len}`;
-    n.el.title = `${midiName(n.m)} · ${n.len} step${n.len > 1 ? 's' : ''}`;
+    n.el.title = `${midiName(n.m)} · ${n.len} step${n.len > 1 ? 's' : ''}${n.legato ? ' · slurred' : ''}`;
     if (!n.el.parentNode) rollEl.appendChild(n.el);
   }
 
-  function addNote(m, start, len) {
-    const n = { m, start, len: 1 };
+  function addNote(m, start, len, legato = false) {
+    const n = { m, start, len: 1, legato };
     notes.push(n);
     n.len = Math.max(1, Math.min(len, maxLen(n)));
     renderNote(n);
@@ -588,17 +692,42 @@
   rollEl.addEventListener('pointerup', endDrag);
   rollEl.addEventListener('pointercancel', () => (drag = null));
 
+  const barsEl = $('bars');
   function setBars(b) {
-    steps = b * STEPS_PER_BAR;
-    notes = notes.filter((n) => n.start < steps);
+    bars = b;
+    steps = b * stepsPerBar;
+    notes = notes.filter((n) => n.start < steps && rowOf[n.m] != null);
     notes.forEach((n) => (n.len = Math.min(n.len, steps - n.start)));
-    document.querySelectorAll('#bars button').forEach((btn) => btn.setAttribute('aria-pressed', +btn.dataset.bars === b));
+    if (![...barsEl.options].some((o) => +o.value === b)) {
+      const o = new Option(String(b));
+      const after = [...barsEl.options].find((x) => +x.value > b);
+      barsEl.add(o, after || null);
+    }
+    barsEl.value = String(b);
     headQueue = [];
     buildGrid();
     wrapEl.scrollLeft = 0;
     syncScroll();
   }
-  document.querySelectorAll('#bars button').forEach((btn) => btn.addEventListener('click', () => setBars(+btn.dataset.bars)));
+  barsEl.addEventListener('change', () => setBars(+barsEl.value));
+
+  // Replace the roll's contents (used by the sheet-music importer).
+  function loadIntoRoll(list, barLen, barCount) {
+    const ms = list.map((n) => n.m);
+    let low = Math.max(21, 12 * Math.floor(Math.min(...ms) / 12));
+    let high = Math.min(108, 12 * Math.floor(Math.max(...ms) / 12) + 11);
+    if (high - low < 23) high = Math.min(108, low + 23);
+    setRange(low, high);
+    stepsPerBar = barLen;
+    notes.forEach((n) => n.el && n.el.remove());
+    notes = [];
+    setBars(Math.max(1, Math.min(MAX_BARS, barCount)));
+    for (const n of list.slice().sort((a, b) => a.start - b.start)) {
+      if (n.start >= steps) continue;
+      if (notes.some((o) => o.m === n.m && o.start === n.start)) continue;
+      addNote(n.m, n.start, n.len, n.legato);
+    }
+  }
 
   function ensureAudio() {
     if (!ctx) initAudio();
@@ -637,7 +766,7 @@
     while (nextTime < ctx.currentTime + 0.1) {
       if (nextStep >= steps) nextStep = 0;
       const starting = notes.filter((n) => n.start === nextStep);
-      for (const n of starting) playNote(n.m, nextTime, stepDur() * (n.len - 0.1));
+      for (const n of starting) playNote(n.m, nextTime, n.legato ? stepDur() * n.len + 0.03 : stepDur() * (n.len - 0.1));
       headQueue.push({ step: nextStep, time: nextTime, starting });
       nextTime += stepDur();
       nextStep = (nextStep + 1) % steps;
@@ -971,6 +1100,173 @@
     });
     boardEl.appendChild(el);
   }
+
+  // ---- Sheet music import (recognizer lives in omr.js) ----
+  const omr = { img: null, result: null };
+  const omrStatus = $('omrStatus'), omrCanvas = $('omrCanvas'), omrView = $('omrView');
+  const optKey = $('optKey');
+  optKey.add(new Option('Auto', 'auto'));
+  for (let k = 7; k >= -7; k--) {
+    const major = k >= 0 ? ['C', 'G', 'D', 'A', 'E', 'B', 'F♯', 'C♯'][k] : ['F', 'B♭', 'E♭', 'A♭', 'D♭', 'G♭', 'C♭'][-k - 1];
+    optKey.add(new Option(`${major} major${k ? ` (${Math.abs(k)}${k > 0 ? '♯' : '♭'})` : ''}`, String(k)));
+  }
+  optKey.value = 'auto';
+  const RELATIVE_MINOR = { C: 'A', G: 'E', D: 'B', A: 'F♯', E: 'C♯', B: 'G♯', 'F♯': 'D♯', 'C♯': 'A♯', F: 'D', 'B♭': 'G', 'E♭': 'C', 'A♭': 'F', 'D♭': 'B♭', 'G♭': 'E♭', 'C♭': 'A♭' };
+
+  function setStatus(html) { omrStatus.innerHTML = html; }
+
+  function loadSheetFile(file) {
+    if (!file || !file.type.startsWith('image/')) { setStatus('<span class="warn">That doesn\'t look like an image file.</span>'); return; }
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { omr.img = img; runOMR(); };
+    img.onerror = () => setStatus('<span class="warn">Couldn\'t open that image. (HEIC photos only open in Safari; try JPG or PNG.)</span>');
+    img.src = url;
+  }
+
+  function runOMR() {
+    if (!omr.img) return;
+    setStatus('Reading the music…');
+    $('loadSheet').disabled = true;
+    setTimeout(() => { // let the status paint first
+      try {
+        omr.result = OMR.recognizeImage(omr.img, { clef: $('optClef').value, key: optKey.value, barLen: $('optTime').value, staves: $('optStaves').value });
+      } catch (err) {
+        console.error(err);
+        setStatus('<span class="warn">Something went wrong reading that image.</span>');
+        return;
+      }
+      showOMR();
+    }, 30);
+  }
+
+  function showOMR() {
+    const r = omr.result;
+    omrView.hidden = false; // before drawing: label sizes depend on the displayed width
+    drawOMR();
+    $('omrLegend').hidden = !$('showMarks').checked;
+    $('omrActions').hidden = false;
+    if (!r.staves.length || !r.notes.length) {
+      setStatus(`<span class="warn">${r.warnings[0] || 'No notes found.'}</span>`);
+      $('loadSheet').disabled = true;
+      return;
+    }
+    const clefs = [...new Set(r.staves.map((st) => st.clef))].join(' + ');
+    const k = r.staves[0].key;
+    const keyText = `${k.name} major / ${RELATIVE_MINOR[k.name]} minor` + (k.count ? ` (${k.count}${k.type === 'sharp' ? '♯' : '♭'})` : '');
+    const parts = [`${r.staves.length} stave${r.staves.length > 1 ? 's' : ''}`, `${clefs} clef`, `key ${keyText}`, `time ${r.timeSig}`, `${r.measureCount} bars`, `${r.notes.length} notes`];
+    let html = 'Found ' + parts.join(' · ') + '.';
+    if (r.estimatedMeasures) html += ` <span class="warn">${r.estimatedMeasures} bar${r.estimatedMeasures > 1 ? 's' : ''} didn't add up, so their timing was guessed from the spacing.</span>`;
+    if (r.measureCount > MAX_BARS) html += ` <span class="warn">Only the first ${MAX_BARS} bars fit in the piano roll.</span>`;
+    setStatus(html + ' If something is off, try the settings above.');
+    $('loadSheet').disabled = false;
+  }
+
+  function drawOMR() {
+    const r = omr.result, src = r.canvas;
+    omrCanvas.width = src.width;
+    omrCanvas.height = src.height;
+    const g = omrCanvas.getContext('2d');
+    g.drawImage(src, 0, 0);
+    if (!$('showMarks').checked || !r.staves.length) return;
+    const sp = r.staves[0].sp;
+    // keep labels readable whether the image is shown fitted or at full size
+    const ratio = omrView.classList.contains('zoomed') ? 1 : omrCanvas.width / Math.max(1, omrView.clientWidth);
+    const fs = Math.max(sp * 0.85, Math.min(11 * ratio, sp * 1.5)); // never so big they cover the next staff
+    const lw = Math.max(1.5, sp * 0.12, ratio);
+    g.lineWidth = lw;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    const label = (text, x, y, color) => {
+      g.font = `600 ${Math.round(fs)}px system-ui, sans-serif`;
+      const tw = g.measureText(text).width + fs * 0.4;
+      g.fillStyle = 'rgba(255,255,255,.85)';
+      g.fillRect(x - tw / 2, y - fs * 0.6, tw, fs * 1.2);
+      g.fillStyle = color;
+      g.fillText(text, x, y);
+    };
+    for (const st of r.staves) {
+      g.strokeStyle = 'rgba(28,126,214,.35)';
+      g.strokeRect(st.left, st.top, st.right - st.left, st.bottom - st.top);
+      g.textAlign = 'left';
+      const kn = st.key.count ? ` · ${st.key.count}${st.key.type === 'sharp' ? '♯' : '♭'}` : '';
+      g.font = `600 ${Math.round(fs)}px system-ui, sans-serif`;
+      g.fillStyle = '#1c7ed6';
+      g.fillText(`${st.clef} clef${kn}`, st.left, st.top - sp * 3.5 - fs * 0.6);
+      g.textAlign = 'center';
+    }
+    for (const b of r.debug.barlines) {
+      g.strokeStyle = 'rgba(224,49,49,.7)';
+      g.beginPath(); g.moveTo(b.x, b.y0 - sp * 0.6); g.lineTo(b.x, b.y1 + sp * 0.6); g.stroke();
+    }
+    for (const a of r.debug.accidentals) {
+      g.strokeStyle = a.key ? '#e8890c' : '#2b8a3e';
+      g.strokeRect(a.x0 - 2, a.y0 - 2, a.x1 - a.x0 + 4, a.y1 - a.y0 + 4);
+    }
+    for (const s of r.debug.slurs) {
+      g.strokeStyle = s.tie ? '#9c36b5' : '#1c7ed6';
+      g.setLineDash([sp * 0.3, sp * 0.2]);
+      g.strokeRect(s.x0 - 2, s.y0 - 2, s.x1 - s.x0 + 4, s.y1 - s.y0 + 4);
+      g.setLineDash([]);
+    }
+    for (const s of r.debug.rests) {
+      g.strokeStyle = '#868e96';
+      g.strokeRect(s.x0 - 2, s.y0 - 2, s.x1 - s.x0 + 4, s.y1 - s.y0 + 4);
+      label({ 16: 'rest', 8: 'rest', 4: 'rest', 2: 'rest' }[s.dur] || 'rest', (s.x0 + s.x1) / 2, s.y1 + fs, '#868e96');
+    }
+    for (const hd of r.debug.heads) {
+      g.strokeStyle = '#d9480f';
+      g.beginPath();
+      g.ellipse(hd.x, hd.y, hd.r * 1.15, hd.r * 0.9, 0, 0, Math.PI * 2);
+      g.stroke();
+    }
+    // note names, staggered so neighbours don't collide
+    const st0 = r.staves;
+    r.debug.heads.forEach((hd, i) => {
+      const st = st0.find((s) => hd.y >= s.bandTop && hd.y < s.bandBot) || st0[0];
+      const below = st.bottom + sp * 1.5 + fs * (0.8 + (i % 2) * 1.25);
+      label(hd.name, hd.x, Math.max(below, hd.y + sp + fs), '#d9480f');
+    });
+  }
+
+  $('pickSheet').addEventListener('click', () => $('sheetFile').click());
+  $('sheetFile').addEventListener('change', (e) => loadSheetFile(e.target.files[0]));
+  $('sampleSheet').addEventListener('click', () => {
+    const show = () => {
+      const img = new Image();
+      img.onload = () => { omr.img = img; runOMR(); };
+      img.src = window.SAMPLE_SHEET;
+    };
+    if (window.SAMPLE_SHEET) return show();
+    const tag = document.createElement('script');
+    tag.src = 'sample-sheet.js';
+    tag.onload = show;
+    tag.onerror = () => setStatus('<span class="warn">Couldn\'t load the sample.</span>');
+    document.head.appendChild(tag);
+  });
+  const dropEl = $('importPanel');
+  dropEl.addEventListener('dragover', (e) => { e.preventDefault(); $('drop').classList.add('over'); });
+  dropEl.addEventListener('dragleave', () => $('drop').classList.remove('over'));
+  dropEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    $('drop').classList.remove('over');
+    loadSheetFile(e.dataTransfer.files[0]);
+  });
+  document.addEventListener('paste', (e) => {
+    const item = [...(e.clipboardData || {}).items || []].find((it) => it.type.startsWith('image/'));
+    if (item) loadSheetFile(item.getAsFile());
+  });
+  ['optClef', 'optKey', 'optTime', 'optStaves'].forEach((id) => $(id).addEventListener('change', runOMR));
+  $('showMarks').addEventListener('change', () => { if (omr.result) { drawOMR(); $('omrLegend').hidden = !$('showMarks').checked; } });
+  omrCanvas.addEventListener('click', () => { omrView.classList.toggle('zoomed'); if (omr.result) drawOMR(); });
+  $('loadSheet').addEventListener('click', () => {
+    const r = omr.result;
+    if (!r || !r.notes.length) return;
+    if (seqTimer) playEl.click(); // stop playback first
+    loadIntoRoll(r.notes, r.barLen, Math.ceil(r.totalSteps / r.barLen));
+    rollEl.closest('.panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setStatus(omrStatus.innerHTML.replace(/ If something is off.*$/, '') + ' Loaded into the piano roll.');
+  });
 
   // Oscilloscope
   const canvas = $('scope');
