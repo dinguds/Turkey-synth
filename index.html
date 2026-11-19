@@ -49,6 +49,7 @@
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; } /* elements with their own display: still hide */
   body {
     margin: 0;
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -433,6 +434,18 @@
   .pt-help summary { cursor: pointer; }
   .pt-help pre { font: 12px/1.5 ui-monospace, monospace; background: var(--bg); padding: 10px; border-radius: 6px; overflow-x: auto; color: var(--text); }
   .pt-help code { font-family: ui-monospace, monospace; }
+
+  /* Sampled instruments */
+  .sampler-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 8px; font-size: .85rem; }
+  .sampler-row select { max-width: 100%; }
+  .sampler-row #gmSelect { flex: 1; min-width: 200px; }
+  .sampler-row label { display: flex; align-items: center; gap: 8px; }
+  .sampler-row .inline input { accent-color: var(--accent); }
+  .sampler-status { font-size: .85rem; margin: 0 0 4px; min-height: 1.2em; }
+  .sampler-status .warn { color: var(--accent); }
+  .credit { font-size: .72rem; color: var(--muted); margin: 0 0 10px; }
+  .credit a { color: inherit; }
+  .preset.sampled::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: currentColor; opacity: .6; vertical-align: 1px; }
 </style>
 </head>
 <body>
@@ -473,6 +486,23 @@
     <div class="presets" id="presets"></div>
     <button class="btn" id="savePreset">Save current sound…</button>
 
+    <h3>Sampled instruments</h3>
+    <p class="flow">Real recordings instead of the synth oscillator: 128 General MIDI instruments, or your own SoundFont (.sf2) or audio file. The envelope, layers and pedals still apply.</p>
+    <div class="sampler-row">
+      <select id="gmSelect" aria-label="Sampled instrument"></select>
+      <button class="btn" id="loadOwn">Load .sf2 or audio file…</button>
+      <input type="file" id="ownFile" accept=".sf2,audio/*" hidden>
+    </div>
+    <div class="sampler-row" id="sf2Row" hidden>
+      <label>SoundFont preset <select id="sf2Preset"></select></label>
+    </div>
+    <div class="sampler-row" id="ownRow" hidden>
+      <label>Recorded note <select id="ownRoot"></select></label>
+      <label class="inline"><input type="checkbox" id="ownLoop"> Loop (for sustained sounds)</label>
+    </div>
+    <p class="sampler-status" id="samplerStatus" role="status"></p>
+    <p class="credit">General MIDI samples: FluidR3 GM by Frank Wen (CC BY 3.0), via <a href="https://github.com/gleitz/midi-js-soundfonts" target="_blank" rel="noopener">midi-js-soundfonts</a>.</p>
+
     <details class="preset-text" id="presetTextBox">
       <summary>Write a preset as text</summary>
       <textarea id="presetText" spellcheck="false" rows="14" aria-label="Preset text"></textarea>
@@ -490,6 +520,7 @@
 Name = My piano          # or name it without starting from a preset
 Base = Piano             # or say which preset to start from
 Oscillator = saw         # sine, square, saw, triangle or custom
+Samples = violin         # or a recorded instrument instead (any GM name; off = synth)
 Harmonics = 1, .5, .3    # custom shape; also saw, square, triangle, 1/n^1.7, odd 1/n
 End harmonics = 1/n^3    # shape at the end of each note
 Morph = 1.2s             # how long the change takes (or off)
@@ -602,6 +633,7 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
 </main>
 
 <script src="omr.js"></script>
+<script src="samples.js"></script>
 <script>
   const MIN_F = 20, MAX_F = 20000;
   const $ = (id) => document.getElementById(id);
@@ -653,7 +685,8 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
 
   // ---- Envelope (ADSR) ----
   const DEFAULT_ENV = { a: 0.005, d: 0.24, s: 0.7, r: 0.12 }; // used when the Envelope pedal is off
-  const envParams = () => (pedals.env.on ? { ...pedals.env.p } : DEFAULT_ENV);
+  const SAMPLE_ENV = { a: 0.003, d: 0.1, s: 1, r: 0.25 }; // recordings have their own shape: don't squash it
+  const envParams = () => (pedals.env.on ? { ...pedals.env.p } : sampler ? SAMPLE_ENV : DEFAULT_ENV);
   // Level of the attack/decay/sustain curve t seconds after note-on (matches what the scheduler draws).
   function envLevel(t, e) {
     if (t < e.a) return t / e.a;
@@ -713,6 +746,7 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
     return slot.wave;
   }
   function applyWave(o) {
+    if (o.isSample) return; // recordings don't have a waveform
     if (wave === 'custom') o.setPeriodicWave(waveFor(o.role === 'B' ? slotB : slotA));
     else o.type = wave;
   }
@@ -748,7 +782,8 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
           out = pan;
         }
         out.connect(dest);
-        oscs.push(...morphPair(pg, hz * ratio, t0, { layer: part.layer, u, ratio, partGain: pg }));
+        const meta = { layer: part.layer, u, ratio, partGain: pg };
+        oscs.push(...(sampler ? samplePlayers(pg, hz * ratio, t0, meta) : morphPair(pg, hz * ratio, t0, meta)));
       }
     }
     return oscs;
@@ -779,6 +814,33 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
     gb.connect(dest);
     return [a, b];
   }
+  // Sampled instrument (null = use the synth oscillator). Set from the Instruments panel.
+  let sampler = null;
+  const pitchOf = (hz) => 69 + 12 * Math.log2(hz / 440);
+  // One voice from a recording: the nearest sample(s), pitch-shifted to the note.
+  function samplePlayers(dest, hz, t0, meta) {
+    const pitch = pitchOf(hz);
+    return sampler.regionsFor(pitch).map((r) => {
+      const src = ctx.createBufferSource();
+      Object.assign(src, meta, { isSample: true, rootPitch: r.rootPitch, role: 'A' });
+      src.buffer = r.buffer;
+      src.playbackRate.value = Math.pow(2, (pitch - r.rootPitch) / 12);
+      src.detune.value = +detuneEl.value + offsetOf(src);
+      if (r.loop) { src.loop = true; src.loopStart = r.loopStart; src.loopEnd = r.loopEnd; }
+      let out = src;
+      if (r.gain !== 1 || r.pan) {
+        const g = ctx.createGain();
+        g.gain.value = r.gain;
+        src.connect(g);
+        out = g;
+        if (r.pan && ctx.createStereoPanner) { const pn = ctx.createStereoPanner(); pn.pan.value = r.pan; g.connect(pn); out = pn; }
+      }
+      out.connect(dest);
+      src.start(t0);
+      return src;
+    });
+  }
+
   // Apply layer level / detune / unison spread changes to notes already sounding.
   function layersChanged() {
     if (!ctx) return;
@@ -799,6 +861,7 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
   }
 
   function setWave(w) {
+    if (sampler) useSynth(); // picking a waveform means "use the synth"
     wave = w;
     waveBtns.forEach((b) => b.setAttribute('aria-pressed', b.dataset.wave === w));
     liveOscs().forEach(applyWave);
@@ -809,7 +872,10 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
 
   freqEl.addEventListener('input', () => {
     updateLabels();
-    if (drone) drone.oscs.forEach((o) => o.frequency.setTargetAtTime(freq() * o.ratio, ctx.currentTime, 0.01));
+    if (drone) drone.oscs.forEach((o) => {
+      if (o.isSample) o.playbackRate.setTargetAtTime(Math.pow(2, (pitchOf(freq() * o.ratio) - o.rootPitch) / 12), ctx.currentTime, 0.01);
+      else o.frequency.setTargetAtTime(freq() * o.ratio, ctx.currentTime, 0.01);
+    });
   });
   detuneEl.addEventListener('input', () => {
     updateLabels();
@@ -1730,6 +1796,108 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
     syncUnison();
   }
 
+  // ---- Sampled instruments UI ----
+  const gmSelect = $('gmSelect'), samplerStatus = $('samplerStatus');
+  gmSelect.add(new Option('Synth (no samples)', ''));
+  Samples.GM_FAMILIES.forEach((fam, f) => {
+    const g = document.createElement('optgroup');
+    g.label = fam;
+    for (let i = 0; i < 8; i++) { const id = Samples.GM_NAMES[f * 8 + i]; g.appendChild(new Option(Samples.prettyName(id), id)); }
+    gmSelect.appendChild(g);
+  });
+  const ownRoot = $('ownRoot');
+  for (let m = 36; m <= 96; m++) ownRoot.add(new Option(midiName(m), String(m)));
+  ownRoot.value = '60';
+  let sf2 = null, loadToken = 0;
+  const setSamplerStatus = (html) => (samplerStatus.innerHTML = html);
+
+  function useSynth() {
+    sampler = null;
+    loadToken++;
+    gmSelect.value = '';
+    $('sf2Row').hidden = $('ownRow').hidden = true;
+    setSamplerStatus('');
+  }
+  function useSampler(inst, label) {
+    sampler = inst;
+    waveBtns.forEach((b) => b.setAttribute('aria-pressed', 'false'));
+    setSamplerStatus(label);
+  }
+  // Load a General MIDI instrument by id (or a loose name like "violin").
+  function chooseGM(nameOrId) {
+    const want = String(nameOrId).toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const id = Samples.GM_NAMES.find((n) => n.replace(/_/g, '') === want) ||
+      Samples.GM_NAMES.find((n) => n.replace(/_/g, '').includes(want));
+    if (!id) return false;
+    ensureAudio();
+    const token = ++loadToken;
+    gmSelect.value = id;
+    $('sf2Row').hidden = $('ownRow').hidden = true;
+    const name = Samples.prettyName(id);
+    setSamplerStatus(`Loading ${name}…`);
+    const inst = Samples.loadGM(ctx, id, (done, total, failed) => {
+      if (token !== loadToken) return;
+      if (done === 1 || failed === 0) useSampler(inst, `${name}: ${done < total ? `loading ${Math.round((done / total) * 100)}%…` : 'ready.'}`);
+      if (done === total) {
+        if (failed === total) { setSamplerStatus(`<span class="warn">Couldn't download ${name}. Check your connection.</span>`); sampler = null; }
+        else setSamplerStatus(`${name}: ready.${failed ? ` <span class="warn">${failed} notes didn't load; nearby ones are used instead.</span>` : ''}`);
+      }
+    });
+    return true;
+  }
+  gmSelect.addEventListener('change', () => {
+    clearPresetHighlight();
+    if (!gmSelect.value) { useSynth(); setWave(wave); return; }
+    chooseGM(gmSelect.value);
+  });
+
+  $('loadOwn').addEventListener('click', () => $('ownFile').click());
+  $('ownFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    ensureAudio();
+    const token = ++loadToken;
+    clearPresetHighlight();
+    setSamplerStatus(`Reading ${file.name}…`);
+    try {
+      const data = await file.arrayBuffer();
+      if (token !== loadToken) return;
+      if (/\.sf[23]$/i.test(file.name) || new TextDecoder().decode(new Uint8Array(data, 8, 4)) === 'sfbk') {
+        sf2 = Samples.parseSF2(data, ctx);
+        if (!sf2.presets.length) throw new Error('This SoundFont has no presets.');
+        const sel = $('sf2Preset');
+        sel.innerHTML = '';
+        sf2.presets.forEach((pr, i) => sel.add(new Option(`${pr.bank === 128 ? 'Drums' : pr.bank ? `Bank ${pr.bank}` : ''} ${pr.program + 1}. ${pr.name}`.trim(), String(i))));
+        $('sf2Row').hidden = false;
+        $('ownRow').hidden = true;
+        gmSelect.value = '';
+        pickSf2Preset(0, file.name);
+      } else {
+        const buffer = await ctx.decodeAudioData(data);
+        const guess = Samples.detectPitch(buffer);
+        ownRoot.value = String(Math.max(36, Math.min(96, guess != null ? Math.round(guess) : 60)));
+        $('ownRow').hidden = false;
+        $('sf2Row').hidden = true;
+        gmSelect.value = '';
+        const inst = Samples.sampleInstrument(file.name, buffer, +ownRoot.value, $('ownLoop').checked);
+        useSampler(inst, `${file.name}: ready. ${guess != null ? `It sounds like ${midiName(Math.round(guess))}` : 'Couldn\'t tell its pitch'}; change "Recorded note" if notes play out of tune.`);
+      }
+    } catch (err) {
+      console.error(err);
+      setSamplerStatus(`<span class="warn">${err && err.message ? err.message : 'Couldn\'t open that file.'}</span>`);
+    }
+  });
+  function pickSf2Preset(i, fileName) {
+    const pr = sf2.presets[i];
+    const inst = sf2.instrumentFor(pr);
+    if (!inst.regionCount) { setSamplerStatus(`<span class="warn">"${pr.name}" has no playable samples. Try another preset.</span>`); return; }
+    useSampler(inst, `${fileName ? fileName + ': ' : ''}"${pr.name}" ready (${sf2.presets.length} presets in this SoundFont).`);
+  }
+  $('sf2Preset').addEventListener('change', (e) => sf2 && pickSf2Preset(+e.target.value));
+  ownRoot.addEventListener('change', () => { if (sampler && sampler.kind === 'sample') sampler.rootPitch = +ownRoot.value; });
+  $('ownLoop').addEventListener('change', () => { if (sampler && sampler.kind === 'sample') sampler.loop = $('ownLoop').checked; });
+
   // ---- Instrument presets ----
   // `harm` = harmonic amplitudes (1st, 2nd, 3rd...) for the Custom wave; or `wave` = a basic waveform.
   // `fx` = pedals to switch on, with their knob settings (pedals left out are switched off).
@@ -1763,6 +1931,11 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
       fx: { env: { a: 0.02, d: 0.3, s: 0.85, r: 0.35 }, filter: { cutoff: 5000, q: 1 }, chorus: { rate: 0.4, depth: 0.4, mix: 0.4 }, delay: { time: 0.3, feedback: 0.3, mix: 0.2 }, reverb: { decay: 2.5, tone: 6000, mix: 0.3 } } },
     { name: 'Chiptune', harm: H((n) => Math.abs(Math.sin(Math.PI * n * 0.25)) / n), // 25% pulse
       fx: { env: { a: 0.002, d: 0.05, s: 0.9, r: 0.03 } } },
+    { name: 'Grand piano', sample: 'acoustic_grand_piano', fx: { reverb: { decay: 2, tone: 7000, mix: 0.2 } } },
+    { name: 'Nylon guitar', sample: 'acoustic_guitar_nylon', fx: { reverb: { decay: 1.6, tone: 6000, mix: 0.18 } } },
+    { name: 'Violin', sample: 'violin', fx: { env: { a: 0.06, d: 0.2, s: 1, r: 0.3 }, reverb: { decay: 2.5, tone: 6000, mix: 0.3 } } },
+    { name: 'Trumpet', sample: 'trumpet', fx: { reverb: { decay: 1.8, tone: 6000, mix: 0.2 } } },
+    { name: 'Choir', sample: 'choir_aahs', fx: { env: { a: 0.15, d: 0.2, s: 1, r: 0.6 }, reverb: { decay: 4, tone: 6000, mix: 0.4 } } },
     { name: 'Plain sine', wave: 'sine', fx: { env: { a: 0.01, d: 0.3, s: 0.8, r: 0.2 } } },
   ];
 
@@ -1794,8 +1967,9 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
     }
     clearPresetHighlight();
     if (btn) btn.setAttribute('aria-pressed', 'true');
-    // a short preview note
     ensureAudio();
+    if (p.sample && chooseGM(p.sample)) return; // the samples download first; no preview note
+    // a short preview note
     if (!running && !seqTimer) playNote(60, ctx.currentTime + 0.02, 0.5);
   }
   function clearPresetHighlight() {
@@ -1807,14 +1981,16 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
     const c = (slot) => ({ real: [...slot.real], imag: [...slot.imag] });
     const isCustom = wave === 'custom';
     const lay = layers.filter((l) => l.on).map((l) => ({ semis: l.semis, level: l.level, detune: l.detune }));
-    return { name, wave, coeffs: isCustom ? c(slotA) : null, coeffsB: isCustom && morph.on ? c(slotB) : null, morph: morph.time, layers: lay, unison: { ...unison }, fx };
+    return { name, wave, coeffs: isCustom ? c(slotA) : null, coeffsB: isCustom && morph.on ? c(slotB) : null, morph: morph.time, layers: lay, unison: { ...unison }, fx,
+      sample: sampler && sampler.kind === 'gm' ? sampler.id : undefined };
   }
   function renderPresets() {
     const box = $('presets');
     box.innerHTML = '';
     const add = (p, user, i) => {
       const b = document.createElement('button');
-      b.className = 'preset' + (user ? ' user' : '');
+      b.className = 'preset' + (user ? ' user' : '') + (p.sample ? ' sampled' : '');
+      if (p.sample) b.title = 'Sampled instrument (downloads the first time)';
       b.textContent = p.name;
       b.setAttribute('aria-pressed', 'false');
       b.addEventListener('click', () => applyPreset(p, b));
@@ -1950,7 +2126,7 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
   function parsePresetText(text) {
     const notes = [];
     let name = null, base = null, wave = null, harm = null, harmEnd = null, morphTime = null, morphOff = false;
-    let uni = null;
+    let uni = null, sampleName = null, sampleOff = false;
     const layerSpecs = [undefined, undefined, undefined];
     let layerAuto = 0, layersTouched = false;
     const pedalSet = {}; // id -> { on, knobs }
@@ -1978,6 +2154,13 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
         const all = [...PRESETS, ...userPresets];
         base = all.find((p) => norm(p.name) === v) || null;
         if (!base) notes.push(`Line ${ln}: no preset called "${val}".`);
+        return;
+      }
+      if (['samples', 'sample', 'sampled', 'instrument', 'sampled instrument', 'gm'].includes(key)) {
+        if (onOff === false || v === 'synth' || v === 'none') { sampleName = null; sampleOff = true; return; }
+        const want = v.replace(/[^a-z0-9]+/g, '');
+        const id = Samples.GM_NAMES.find((n) => n.replace(/_/g, '') === want) || Samples.GM_NAMES.find((n) => n.replace(/_/g, '').includes(want));
+        if (id) sampleName = id; else notes.push(`Line ${ln}: no sampled instrument called "${val}" (try piano, violin, trumpet, flute, choir...).`);
         return;
       }
       if (['oscillator', 'osc', 'wave', 'waveform', 'shape'].includes(key)) {
@@ -2067,6 +2250,8 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
     if (morphTime && !p.harmEnd && !p.coeffsB) notes.push('Morph needs "End harmonics = ..." to have something to change into.');
     if ((p.harmEnd || p.coeffsB) && p.wave) notes.push('End harmonics only work with a custom oscillator, so they were ignored.');
     if (layersTouched) p.layers = layerSpecs.map((l) => l || null);
+    if (sampleName) p.sample = sampleName;
+    if (sampleOff || wave || harm) delete p.sample; // asking for an oscillator means the synth
     if (uni) p.unison = uni;
     for (const [id, set] of Object.entries(pedalSet)) {
       const def = PEDALS.find((d) => d.id === id);
@@ -2082,14 +2267,16 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
   function soundToText(name) {
     const lines = [`Name = ${name || 'My sound'}`];
     const waveName = { sawtooth: 'saw' }[wave] || wave;
-    lines.push(`Oscillator = ${waveName}`);
+    if (sampler && sampler.kind === 'gm') lines.push(`Samples = ${Samples.prettyName(sampler.id).toLowerCase()}`);
+    else if (sampler) lines.push(`# Samples: your own file "${sampler.name}" (files can't be saved in text)`);
+    if (!sampler) lines.push(`Oscillator = ${waveName}`);
     const mags = (slot) => {
       const m = [];
       for (let k = 1; k <= 32; k++) m.push(Math.hypot(slot.real[k], slot.imag[k]));
       while (m.length > 1 && m[m.length - 1] < 0.001) m.pop();
       return m.map(r3).join(', ');
     };
-    if (wave === 'custom') {
+    if (wave === 'custom' && !sampler) {
       lines.push(`Harmonics = ${mags(slotA)}`);
       if (morph.on) lines.push(`End harmonics = ${mags(slotB)}`, `Morph = ${sec(morph.time).replace(' ', '')}`);
       else lines.push('Morph = off');
