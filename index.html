@@ -970,9 +970,11 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
     return end - n.start;
   }
 
+  // Which step is under clientX. Measured from the cells themselves: when the grid is wider than the
+  // screen the cells overflow the roll element, so its own width can't be used.
   function stepAt(clientX) {
-    const r = rollEl.getBoundingClientRect();
-    const s = Math.floor((clientX - r.left - KEY_W) / ((r.width - KEY_W) / steps));
+    const first = cellCols[0][0].getBoundingClientRect(), last = cellCols[steps - 1][0].getBoundingClientRect();
+    const s = Math.floor(((clientX - first.left) / (last.right - first.left)) * steps);
     return Math.max(0, Math.min(steps - 1, s));
   }
 
@@ -994,14 +996,32 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
       playNote(n.m, ctx.currentTime, 0.2);
       flashKey(n.m, 200);
     }
-    drag = { n, created, moved: false, s0: stepAt(e.clientX), len0: n.len };
+    drag = { n, created, moved: false, s0: stepAt(e.clientX), len0: n.len, x: e.clientX };
     rollEl.setPointerCapture(e.pointerId);
+    edgeScroll();
   });
+  function dragTo(clientX) {
+    const { n } = drag;
+    const len = Math.max(1, Math.min(maxLen(n), drag.len0 + stepAt(clientX) - drag.s0));
+    if (len !== n.len) { n.len = len; drag.moved = true; renderNote(n); }
+  }
+  // While dragging near the left/right edge of a scrolled grid, keep scrolling so notes can grow past the view.
+  let edgeTimer = null;
+  function edgeScroll() {
+    clearInterval(edgeTimer);
+    edgeTimer = setInterval(() => {
+      if (!drag) return clearInterval(edgeTimer);
+      const r = wrapEl.getBoundingClientRect(), x = drag.x;
+      const speed = x > r.right - 30 ? 8 : x < r.left + KEY_W + 20 ? -8 : 0;
+      if (!speed) return;
+      wrapEl.scrollLeft += speed;
+      dragTo(x);
+    }, 30);
+  }
   rollEl.addEventListener('pointermove', (e) => {
     if (!drag) return;
-    const { n } = drag;
-    const len = Math.max(1, Math.min(maxLen(n), drag.len0 + stepAt(e.clientX) - drag.s0));
-    if (len !== n.len) { n.len = len; drag.moved = true; renderNote(n); }
+    drag.x = e.clientX;
+    dragTo(e.clientX);
   });
   const endDrag = () => {
     if (drag && !drag.created && !drag.moved) removeNote(drag.n);
@@ -1009,6 +1029,7 @@ Verb mix = 20%           # setting a knob turns its pedal on</pre>
   };
   rollEl.addEventListener('pointerup', endDrag);
   rollEl.addEventListener('pointercancel', () => (drag = null));
+  rollEl.addEventListener('lostpointercapture', () => { if (drag) endDrag(); });
 
   const barsEl = $('bars');
   function setBars(b) {
